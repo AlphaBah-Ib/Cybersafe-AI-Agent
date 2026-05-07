@@ -1,0 +1,39 @@
+# ════════════════════════════════════════════════════════════════════════
+# Cybersafe Agent — Configuration
+#
+# Copie ce fichier vers /etc/cybersafe/config.yaml et personnalise-le.
+# Permissions recommandées : 0600 (root:root)
+#   sudo cp config.example.yaml /etc/cybersafe/config.yaml
+#   sudo chmod 600 /etc/cybersafe/config.yaml
+# ════════════════════════════════════════════════════════════════════════
+
+# ── Token de l'agent (créé sur le dashboard Cybersafe) ──────────────────
+token: csa_REMPLACE_PAR_TON_TOKEN_ICI
+
+# ── URL de l'API Cybersafe ──────────────────────────────────────────────
+api_url: https://cybersafe-ai-production.up.railway.app/api
+
+# ── Fichiers de log à surveiller ────────────────────────────────────────
+sources:
+  - /var/log/auth.log         # SSH, sudo, login (Ubuntu/Debian)
+  # - /var/log/secure         # RHEL/CentOS/Rocky équivalent
+  # - /var/log/syslog         # Système général
+  # - /var/log/nginx/access.log
+  # - /var/log/nginx/error.log
+
+# ── Buffer (optionnel, defaults raisonnables) ───────────────────────────
+buffer:
+  max_size: 100               # Flush dès qu'on atteint 100 events
+  flush_interval: 2.0         # OU toutes les 2 secondes
+
+# ── Logging local de l'agent ────────────────────────────────────────────
+log_file: /var/log/cybersafe-agent.log
+log_level: INFO               # DEBUG / INFO / WARNING / ERROR
+
+# ── Tail (avancé) ───────────────────────────────────────────────────────
+tail_poll_interval: 1.0       # Vérification toutes les 1s
+
+# ── Retry réseau (avancé) ───────────────────────────────────────────────
+retry_max_attempts: 6
+retry_base_delay: 1.0
+retry_max_delay: 60.0
