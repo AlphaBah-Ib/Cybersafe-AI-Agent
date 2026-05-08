@@ -2,9 +2,10 @@
 # Cybersafe Agent — Configuration
 #
 # Copie ce fichier vers /etc/cybersafe/config.yaml et personnalise-le.
-# Permissions recommandées : 0600 (root:root)
+# Permissions recommandées : 0640 (root:cybersafe)
 #   sudo cp config.example.yaml /etc/cybersafe/config.yaml
-#   sudo chmod 600 /etc/cybersafe/config.yaml
+#   sudo chown root:cybersafe /etc/cybersafe/config.yaml
+#   sudo chmod 640 /etc/cybersafe/config.yaml
 # ════════════════════════════════════════════════════════════════════════
 
 # ── Token de l'agent (créé sur le dashboard Cybersafe) ──────────────────
@@ -26,7 +27,20 @@ buffer:
   max_size: 100               # Flush dès qu'on atteint 100 events
   flush_interval: 2.0         # OU toutes les 2 secondes
 
+# ── Spool disque (résilience SOC-022) ───────────────────────────────────
+# Si l'envoi au backend échoue après tous les retries, les events sont
+# persistés sur disque ici, puis rejoués au prochain succès de connexion.
+# Quand le spool dépasse max_size_mb, les plus vieux fichiers sont
+# supprimés en premier (FIFO).
+spool:
+  enabled: true                 # false pour désactiver le spool
+  dir: /var/spool/cybersafe     # writable par l'utilisateur 'cybersafe'
+  max_size_mb: 100              # Limite totale du spool sur disque (Mo)
+
 # ── Logging local de l'agent ────────────────────────────────────────────
+# Note : sous systemd, install.sh réécrit ce chemin vers
+# /var/lib/cybersafe/agent.log pour rester compatible avec
+# le hardening ProtectSystem=strict du service.
 log_file: /var/log/cybersafe-agent.log
 log_level: INFO               # DEBUG / INFO / WARNING / ERROR
 

@@ -10,6 +10,10 @@ Format attendu (config.example.yaml) :
     buffer:
       max_size: 100
       flush_interval: 2.0
+    spool:
+      enabled: true
+      dir: /var/spool/cybersafe
+      max_size_mb: 100
     log_file: /var/log/cybersafe-agent.log
     log_level: INFO
 """
@@ -49,6 +53,11 @@ class AgentConfig:
     retry_max_attempts: int = 6
     retry_base_delay: float = 1.0
     retry_max_delay: float = 60.0
+
+    # ── Spool disque (résilience SOC-022) ────────────────────────────────
+    spool_enabled: bool = True
+    spool_dir: str = "/var/spool/cybersafe"
+    spool_max_size_mb: int = 100
 
     @property
     def ingest_url(self) -> str:
@@ -106,6 +115,8 @@ def load_config(path: str = None) -> AgentConfig:
 
     # Construction du dataclass avec defaults
     buffer_cfg = raw.get("buffer", {}) or {}
+    spool_cfg = raw.get("spool", {}) or {}
+
     return AgentConfig(
         token=token,
         api_url=raw["api_url"].strip(),
@@ -118,4 +129,7 @@ def load_config(path: str = None) -> AgentConfig:
         retry_max_attempts=int(raw.get("retry_max_attempts", 6)),
         retry_base_delay=float(raw.get("retry_base_delay", 1.0)),
         retry_max_delay=float(raw.get("retry_max_delay", 60.0)),
+        spool_enabled=bool(spool_cfg.get("enabled", True)),
+        spool_dir=str(spool_cfg.get("dir", "/var/spool/cybersafe")).strip(),
+        spool_max_size_mb=int(spool_cfg.get("max_size_mb", 100)),
     )

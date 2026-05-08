@@ -3,6 +3,8 @@ Point d'entrée principal de l'agent Cybersafe.
 
 Orchestration :
     [Tailer] → [Parser] → [Buffer] → [Sender] → Backend Cybersafe
+                                          ↓
+                                       [Spool]   (si envoi échoue)
 """
 import logging
 import logging.handlers
@@ -15,6 +17,7 @@ from .buffer import EventBuffer
 from .config import AgentConfig, load_config
 from .parser import line_to_event
 from .sender import EventSender
+from .spool import EventSpool
 from .tailer import LogTailer
 
 
@@ -57,6 +60,38 @@ def setup_logging(config: AgentConfig):
         )
 
 
+def build_spool(config: AgentConfig):
+    """
+    Construit l'EventSpool si activé en config.
+
+    Retourne None si le spool est désactivé ou si l'init échoue
+    (ex: dossier non créable). Dans ce dernier cas l'agent
+    continue sans spool plutôt que de crasher.
+    """
+    if not config.spool_enabled:
+        logger.warning(
+            "⚠ Spool disabled in config — events will be lost on prolonged outages"
+        )
+        return None
+
+    try:
+        spool = EventSpool(
+            directory=config.spool_dir,
+            max_size_mb=config.spool_max_size_mb,
+        )
+        logger.info(
+            f"   Spool:      {config.spool_dir} "
+            f"(max {config.spool_max_size_mb} MB, {spool.count()} file(s) queued)"
+        )
+        return spool
+    except Exception as e:
+        logger.error(
+            f"❌ Cannot initialize spool at {config.spool_dir}: {e} "
+            f"— continuing without spool"
+        )
+        return None
+
+
 def run():
     """Boucle principale de l'agent."""
     # ── 1. Config ────────────────────────────────────────────────────────
@@ -73,18 +108,31 @@ def run():
         f"{config.buffer_flush_interval}s"
     )
     logger.info(f"   Log file:   {config.log_file}")
+
+    # ── 2. Spool (résilience disque) ─────────────────────────────────────
+    spool = build_spool(config)
+
     logger.info("=" * 60)
 
-    # ── 2. Sender ────────────────────────────────────────────────────────
+    # ── 3. Sender (avec spool si dispo) ──────────────────────────────────
     sender = EventSender(
         ingest_url=config.ingest_url,
         token=config.token,
         max_attempts=config.retry_max_attempts,
         base_delay=config.retry_base_delay,
         max_delay=config.retry_max_delay,
+        spool=spool,
     )
 
-    # ── 3. Buffer (flush taille OU temps, callback = sender.send) ────────
+    # Rattrapage : tente de rejouer ce qui dort dans le spool depuis
+    # la session précédente (kill, reboot, perte réseau prolongée).
+    if spool is not None and spool.count() > 0:
+        logger.info(
+            f"♻ Spool catchup at startup: {spool.count()} file(s) to replay"
+        )
+        sender.drain_spool_blocking()
+
+    # ── 4. Buffer (flush taille OU temps, callback = sender.send) ────────
     buffer = EventBuffer(
         max_size=config.buffer_max_size,
         flush_interval=config.buffer_flush_interval,
@@ -92,7 +140,7 @@ def run():
     )
     buffer.start()
 
-    # ── 4. Tailer (un thread par fichier) ────────────────────────────────
+    # ── 5. Tailer (un thread par fichier) ────────────────────────────────
     def on_new_line(line: str, source_path: str):
         """Callback appelé pour chaque nouvelle ligne capturée."""
         event = line_to_event(line, source_path)
@@ -105,7 +153,7 @@ def run():
     )
     tailer.start()
 
-    # ── 5. Gestion des signaux pour shutdown propre ──────────────────────
+    # ── 6. Gestion des signaux pour shutdown propre ──────────────────────
     stop_requested = {"value": False}
 
     def handle_signal(signum, frame):
@@ -117,14 +165,14 @@ def run():
 
     logger.info("👀 Surveillance active. Ctrl+C pour quitter.")
 
-    # ── 6. Boucle d'attente ──────────────────────────────────────────────
+    # ── 7. Boucle d'attente ──────────────────────────────────────────────
     try:
         while not stop_requested["value"]:
             signal.pause()  # bloquant jusqu'à signal
     except (KeyboardInterrupt, SystemExit):
         pass
 
-    # ── 7. Arrêt propre ──────────────────────────────────────────────────
+    # ── 8. Arrêt propre ──────────────────────────────────────────────────
     logger.info("🛑 Arrêt du tailer...")
     tailer.stop()
 

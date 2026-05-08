@@ -1,0 +1,67 @@
+[Unit]
+Description=Cybersafe-AI Agent - Continuous log collection and forwarding
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cybersafe
+Group=cybersafe
+# adm + syslog: read access to /var/log/auth.log and friends without root
+SupplementaryGroups=adm syslog
+
+WorkingDirectory=/opt/cybersafe-agent
+EnvironmentFile=-/etc/cybersafe/agent.env
+ExecStart=/opt/cybersafe-agent/venv/bin/python -m cybersafe_agent
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Logs go to journald: journalctl -u cybersafe-agent -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cybersafe-agent
+
+# --- Security hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Writable paths only where the agent needs to persist state
+ReadWritePaths=/var/lib/cybersafe /var/spool/cybersafe
+ReadOnlyPaths=/etc/cybersafe
+
+# No Linux capabilities needed; file access via group membership
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Resource limits — keep the agent tight
+LimitNOFILE=4096
+MemoryMax=256M
+CPUQuota=50%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
