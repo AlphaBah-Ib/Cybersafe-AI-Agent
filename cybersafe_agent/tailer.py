@@ -42,7 +42,13 @@ class LogTailer:
         self._threads: List[threading.Thread] = []
 
     def start(self):
-        """Démarre un thread par fichier."""
+        """Démarre un thread par fichier (idempotent)."""
+        if self._threads:
+            logger.warning("LogTailer.start() called twice; ignoring second call")
+            return
+        if not self.paths:
+            logger.warning("⚠ No source files configured — tailer is idle")
+            return
         for path in self.paths:
             t = threading.Thread(
                 target=self._tail_loop,
@@ -94,7 +100,7 @@ class LogTailer:
                                 )
                                 break  # ré-ouverture via boucle externe
                             # Tronqué ?
-                            if f.tell() > os.path.getsize(path):
+                            if f.tell() > os.fstat(f.fileno()).st_size:
                                 logger.info(
                                     f"  ↻ Log truncated: {path} (re-opening)"
                                 )
