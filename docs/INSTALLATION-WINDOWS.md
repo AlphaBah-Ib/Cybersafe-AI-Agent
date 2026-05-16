@@ -1,5 +1,5 @@
-═══════════════════════════════════════════════════════════════════════
-markdown# Cybersafe-AI Agent — Guide d'installation Windows
+# Cybersafe-AI Agent — Guide d'installation Windows
+
 
 Documentation complète pour déployer l'agent Cybersafe-AI sur Windows.
 
@@ -975,4 +975,3 @@ Pour toute question :
 ---
 
 (c) 2026 Cybersafe-AI — Tous droits réservés.
-═══════════════════════════════════════════════════════════════════════
