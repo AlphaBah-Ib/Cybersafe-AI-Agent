@@ -1,2 +1,5 @@
 requests>=2.28.0
 PyYAML>=6.0
+
+# Windows agent only (SOC-200 Phase 2) — ignored on Linux/macOS
+pywin32>=305 ; sys_platform == "win32"

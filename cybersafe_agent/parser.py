@@ -1,109 +1,58 @@
 """
-Parsing basique des lignes de log.
+Façade publique du parser multi-plateforme.
 
-Détecte la sévérité et le type d'event à partir de patterns simples,
-puis extrait des champs structurés (IP, user, port, PID, commande).
+Cette façade détecte le format de la ligne reçue et délègue à
+l'implémentation appropriée :
+  - Ligne commençant par `{"channel":` → JSON Windows Event Log
+    → parsers.windows.line_to_event()
+  - Sinon → texte brut syslog Linux/macOS
+    → parsers.linux.line_to_event()
+
+L'API publique `line_to_event(line, source_path) -> dict` reste identique
+à l'historique pour garantir zéro régression sur le code existant qui
+consomme cette fonction (main.py via `from .parser import line_to_event`).
+
+Pattern : "Strategy via content detection" — on ne se base PAS sur l'OS
+au runtime (l'agent peut très bien tourner sur Linux et recevoir du JSON
+Windows via un agent forwarder distant à l'avenir), mais sur le contenu
+de la ligne elle-même. Plus robuste long terme.
+
+Historique :
+  - SOC-011 : Parser Linux/syslog initial
+  - SOC-200 : Refactor en façade multi-plateforme (Phase 2 Windows)
 """
-import os
-import re
-from datetime import datetime, timezone
-from typing import Tuple
+from . import parsers as _parsers_pkg  # noqa: F401 — force load du package
 
 
-# ── Patterns regex précompilés ───────────────────────────────────────────
-RE_IP = re.compile(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})")
-RE_USER_FROM = re.compile(r"for (\w+) from")
-RE_USER_INVALID = re.compile(r"[Ii]nvalid user (\w+)")
-RE_PORT = re.compile(r"port (\d+)")
-RE_PID = re.compile(r"\[(\d+)\]")
-RE_SUDO_USER = re.compile(r"sudo:\s+(\w+)\s*:")
-RE_SUDO_CMD = re.compile(r"COMMAND=(\S+(?:\s\S+)*)")
-
-
-def detect_severity_and_type(line: str) -> Tuple[str, str]:
-    """
-    Détermine (severity, event_type) à partir de patterns courants.
-
-    Retourne un tuple (severity, event_type).
-    Severity: info, low, medium, high, critical
-    """
-    lower = line.lower()
-
-    # Tentatives d'authentification (sévérité haute)
-    if "failed password" in lower:
-        return ("high", "ssh_failed_login")
-    if "authentication failure" in lower:
-        return ("high", "auth_failure")
-    if "invalid user" in lower:
-        return ("high", "invalid_user")
-
-    # Connexions réussies (sévérité moyenne — à monitorer)
-    if "accepted password" in lower or "accepted publickey" in lower:
-        return ("medium", "ssh_login_success")
-
-    # Sudo (sévérité moyenne — à monitorer)
-    if "sudo:" in lower and "command=" in lower:
-        return ("medium", "sudo_command")
-
-    # Sessions (info)
-    if "session opened" in lower:
-        return ("info", "session_opened")
-    if "session closed" in lower:
-        return ("info", "session_closed")
-
-    # Erreurs systèmes (medium)
-    if "error" in lower or "critical" in lower:
-        return ("medium", "system_error")
-
-    return ("info", "")
-
-
-def extract_parsed_fields(line: str) -> dict:
-    """Extrait des champs structurés (IP, user, port, etc.) de la ligne."""
-    parsed = {}
-
-    if m := RE_IP.search(line):
-        parsed["ip"] = m.group(1)
-
-    # Extraction de l'utilisateur (3 patterns possibles)
-    if m := RE_USER_FROM.search(line):
-        parsed["user"] = m.group(1)
-    elif m := RE_USER_INVALID.search(line):
-        parsed["user"] = m.group(1)
-    elif m := RE_SUDO_USER.search(line):
-        parsed["user"] = m.group(1)
-
-    if m := RE_PORT.search(line):
-        try:
-            parsed["port"] = int(m.group(1))
-        except ValueError:
-            pass
-
-    if m := RE_PID.search(line):
-        try:
-            parsed["pid"] = int(m.group(1))
-        except ValueError:
-            pass
-
-    if m := RE_SUDO_CMD.search(line):
-        # Tronqué pour éviter abus (ex: COMMAND=cat /etc/shadow ...)
-        parsed["cmd"] = m.group(1)[:200]
-
-    return parsed
+# Préfixe utilisé par WindowsLogTailer pour sérialiser ses events en JSON
+# avant de les passer au callback. C'est ce préfixe qui sert de signature
+# pour distinguer Windows (JSON) de Linux (texte syslog).
+_WINDOWS_JSON_PREFIX = '{"channel":'
 
 
 def line_to_event(line: str, source_path: str) -> dict:
     """
-    Transforme une ligne de log brute en payload event prêt pour /api/soc/ingest/.
+    Transforme une ligne de log (Linux syslog OU Windows JSON) en payload
+    event prêt pour /api/soc/ingest/.
 
-    Format conforme à docs/agent-event-format.md (SOC-011).
+    Détection automatique du format :
+      - Ligne commence par `{"channel":` → Windows Event Log (JSON)
+      - Sinon → Linux/macOS syslog (texte brut)
+
+    Le contrat de retour est identique pour les 2 cas (dict avec keys
+    source, raw, event_type, severity, ts, parsed).
     """
-    severity, event_type = detect_severity_and_type(line)
-    return {
-        "source": os.path.basename(source_path),
-        "raw": line.strip()[:5000],  # tronqué pour éviter envoi monstrueux
-        "event_type": event_type,
-        "severity": severity,
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "parsed": extract_parsed_fields(line),
-    }
+    # On strip ici pour gérer les lignes avec espaces/tabs au début.
+    stripped = line.lstrip() if line else ""
+
+    if stripped.startswith(_WINDOWS_JSON_PREFIX):
+        # Délégation au parser Windows pour les events JSON.
+        from .parsers.windows import line_to_event as _windows_line_to_event
+        return _windows_line_to_event(line, source_path)
+
+    # Par défaut, parser Linux/syslog (préserve le comportement historique).
+    from .parsers.linux import line_to_event as _linux_line_to_event
+    return _linux_line_to_event(line, source_path)
+
+
+__all__ = ["line_to_event"]

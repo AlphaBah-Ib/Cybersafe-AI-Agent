@@ -19,7 +19,7 @@ Format attendu (config.example.yaml) :
 """
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 import yaml
@@ -58,6 +58,19 @@ class AgentConfig:
     spool_enabled: bool = True
     spool_dir: str = "/var/spool/cybersafe"
     spool_max_size_mb: int = 100
+
+    # ── Windows Event Log (SOC-200 Phase 2) ─────────────────────────────
+    # Channels Event Log surveillés. Si vide -> utilise les 8 channels
+    # par défaut alignés MITRE ATT&CK (voir platforms/windows.py).
+    windows_channels: List[str] = field(default_factory=list)
+
+    # EventIDs filtrés sur le channel Security (XPath natif).
+    # Si vide -> utilise les 20 EventIDs MITRE ATT&CK par défaut.
+    windows_security_event_ids: List[int] = field(default_factory=list)
+
+    # Dossier de persistance des bookmarks Windows Event Log.
+    # Par défaut: C:\\ProgramData\\Cybersafe\\bookmarks (Windows)
+    windows_bookmarks_dir: str = ""
 
     @property
     def ingest_url(self) -> str:
@@ -115,6 +128,7 @@ def load_config(path: str = None) -> AgentConfig:
 
     # Construction du dataclass avec defaults
     buffer_cfg = raw.get("buffer", {}) or {}
+    windows_cfg = raw.get("windows", {}) or {}
     spool_cfg = raw.get("spool", {}) or {}
 
     return AgentConfig(
@@ -132,4 +146,7 @@ def load_config(path: str = None) -> AgentConfig:
         spool_enabled=bool(spool_cfg.get("enabled", True)),
         spool_dir=str(spool_cfg.get("dir", "/var/spool/cybersafe")).strip(),
         spool_max_size_mb=int(spool_cfg.get("max_size_mb", 100)),
+        windows_channels=[str(c).strip() for c in (windows_cfg.get("channels") or []) if str(c).strip()],
+        windows_security_event_ids=[int(eid) for eid in (windows_cfg.get("security_event_ids") or []) if str(eid).strip().isdigit()],
+        windows_bookmarks_dir=str(windows_cfg.get("bookmarks_dir", "")).strip(),
     )

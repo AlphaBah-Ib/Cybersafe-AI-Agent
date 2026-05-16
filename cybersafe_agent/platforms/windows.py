@@ -1,0 +1,551 @@
+"""
+Tail des Windows Event Log via pywin32 (SOC-200 / Phase 2).
+
+Cette implémentation lit en continu les channels Event Log Windows
+configurés (Security, System, PowerShell, etc.) et émet chaque event
+sous forme de JSON sérialisé via le callback fourni.
+
+Architecture :
+  - 1 thread par channel (parallèle à LinuxLogTailer)
+  - Subscription PUSH-based via EvtSubscribe (API moderne, CPU-efficient)
+  - Filtrage XPath natif (sélection des EventIDs côté kernel Windows)
+  - Bookmarks Windows natifs (xml) persistés sur disque pour continuité
+    après redémarrage de l'agent (résilience SOC critique)
+
+Le format JSON émis est consommé par cybersafe_agent.parsers.windows.line_to_event()
+qui le normalise en dict standard backend.
+
+Requiert : pywin32 (>= 305 recommandé).
+Installation : pip install pywin32
+
+Documentation Microsoft EventLog API :
+  https://learn.microsoft.com/en-us/windows/win32/wes/windows-event-log
+
+Historique :
+  - SOC-200 : implémentation initiale Phase 2 Windows
+"""
+import json
+import logging
+import os
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, List, Optional
+
+
+logger = logging.getLogger("cybersafe.tailer.windows")
+
+
+# =============================================================================
+# Fail-fast : pywin32 absent
+# =============================================================================
+# Cet import lèvera ImportError clair au démarrage si l'agent tourne
+# sans pywin32 installé. Mieux qu'un crash mystérieux 30s plus tard.
+
+try:
+    import win32evtlog  # noqa: F401
+    import win32event   # noqa: F401
+    import winerror     # noqa: F401
+    import pywintypes   # noqa: F401
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "Le module pywin32 est requis pour l'agent Windows. "
+        "Installation : pip install pywin32"
+    ) from exc
+
+
+# =============================================================================
+# Constantes : channels par défaut + EventIDs critiques (alignés ADR-001)
+# =============================================================================
+# Ces valeurs sont les DÉFAUTS si l'utilisateur n'a rien configuré dans
+# config.yaml. Voir docs/adr/ADR-001-windows-agent-stack.md pour la
+# justification de chaque channel et EventID.
+
+DEFAULT_WINDOWS_CHANNELS = [
+    "Security",                                          # Tier 1
+    "System",                                            # Tier 1
+    "Microsoft-Windows-PowerShell/Operational",          # Tier 2 (scripts)
+    "Microsoft-Windows-Windows Defender/Operational",    # Tier 2 (AV)
+    "Microsoft-Windows-TaskScheduler/Operational",       # Tier 3 (persist)
+    "Microsoft-Windows-WinRM/Operational",               # Tier 3 (remote)
+    "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational",  # RDP
+    "Microsoft-Windows-Sysmon/Operational",              # Bonus (EDR-like)
+]
+
+# EventIDs filtrés sur le channel Security (XPath natif).
+# Pour les autres channels, on prend TOUS les events (déjà filtrés
+# par la sélection des channels eux-mêmes).
+DEFAULT_SECURITY_EVENT_IDS = [
+    # Authentication
+    4624, 4625, 4647, 4648, 4672, 4673,
+    # Process & Service
+    4688, 4697,
+    # Object access
+    4663,
+    # Audit policy (CRITIQUE - attaquant efface ses traces)
+    4719, 1102,
+    # Account management
+    4720, 4722, 4724, 4725, 4728, 4732, 4738,
+    # Kerberos (AD)
+    4768, 4769,
+]
+
+# Subscription flags (cf. win32evtlog SubscribeFlag constants)
+# StartAtOldestRecord = remonter dans l'historique au démarrage
+# StartAfterBookmark = continuer après le dernier bookmark sauvé
+_EvtSubscribeStartAtOldestRecord = 2
+_EvtSubscribeStartAfterBookmark = 3
+
+# Timeout en ms pour attendre un event lors du polling de la subscription.
+# 1000 ms = check toutes les 1s si on doit s'arrêter (stop_event).
+_SUBSCRIPTION_WAIT_TIMEOUT_MS = 1000
+
+
+# =============================================================================
+# Helpers : XPath query & XML -> dict parsing
+# =============================================================================
+
+def _build_xpath_query(channel: str, security_event_ids: List[int]) -> str:
+    """
+    Construit le XPath query pour filtrer côté kernel Windows.
+
+    Pour le channel 'Security', on filtre sur les EventIDs configurés
+    (économise massivement de CPU côté agent vs filtrage Python).
+    Pour les autres channels, on prend tous les events (le filtrage
+    est déjà fait par le choix des channels).
+
+    Référence XPath WEvtApi:
+      https://learn.microsoft.com/en-us/windows/win32/wes/consuming-events
+    """
+    if channel == "Security" and security_event_ids:
+        # Build "EventID=X or EventID=Y or ..." pour les IDs configurés
+        eid_clauses = " or ".join(
+            f"EventID={int(eid)}" for eid in security_event_ids
+        )
+        return f"*[System[({eid_clauses})]]"
+
+    # Pour les autres channels : tous les events
+    return "*"
+
+
+def _parse_event_xml(xml_str: str) -> dict:
+    """
+    Parse l'XML d'un event Windows en dict Python compact.
+
+    Format Windows XML (simplifié) :
+        <Event>
+          <System>
+            <Provider Name="..."/>
+            <EventID>4625</EventID>
+            <Level>4</Level>
+            <TimeCreated SystemTime="..."/>
+            <Computer>DESKTOP-ABC</Computer>
+            <Channel>Security</Channel>
+          </System>
+          <EventData>
+            <Data Name="TargetUserName">admin</Data>
+            <Data Name="IpAddress">192.168.1.100</Data>
+            ...
+          </EventData>
+        </Event>
+
+    Sortie dict :
+        {
+            "channel": "Security",
+            "event_id": 4625,
+            "level": "Information",
+            "time_created": "ISO 8601 UTC",
+            "computer": "DESKTOP-ABC",
+            "provider": "Microsoft-Windows-Security-Auditing",
+            "event_data": {
+                "TargetUserName": "admin",
+                "IpAddress": "192.168.1.100",
+                ...
+            }
+        }
+
+    Robustesse : si une clé manque, on dégrade gracieusement (chaîne vide
+    ou dict vide), pas de crash.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError as exc:
+        logger.warning(f"Failed to parse event XML: {exc}")
+        return {
+            "channel": "Unknown",
+            "event_id": 0,
+            "level": "Information",
+            "time_created": datetime.now(timezone.utc).isoformat(),
+            "computer": "",
+            "provider": "",
+            "event_data": {},
+        }
+
+    # Namespace par défaut Windows Event XML
+    ns = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
+
+    def _findtext(path: str, default: str = "") -> str:
+        el = root.find(path, ns)
+        return (el.text or default) if el is not None else default
+
+    def _getattr(path: str, attr: str, default: str = "") -> str:
+        el = root.find(path, ns)
+        if el is None:
+            return default
+        return el.attrib.get(attr, default)
+
+    # === Section System ===
+    channel = _findtext("e:System/e:Channel", "Unknown")
+    event_id_str = _findtext("e:System/e:EventID", "0")
+    try:
+        event_id = int(event_id_str)
+    except (ValueError, TypeError):
+        event_id = 0
+
+    level_str = _findtext("e:System/e:Level", "4")
+    level_map = {"1": "Critical", "2": "Error", "3": "Warning",
+                 "4": "Information", "5": "Verbose"}
+    level = level_map.get(level_str, "Information")
+
+    time_created = _getattr("e:System/e:TimeCreated", "SystemTime",
+                            datetime.now(timezone.utc).isoformat())
+    computer = _findtext("e:System/e:Computer", "")
+    provider = _getattr("e:System/e:Provider", "Name", "")
+
+    # === Section EventData ===
+    event_data = {}
+    event_data_el = root.find("e:EventData", ns)
+    if event_data_el is not None:
+        for data_el in event_data_el.findall("e:Data", ns):
+            name = data_el.attrib.get("Name", "").strip()
+            value = (data_el.text or "").strip()
+            if name and value not in ("", "-"):
+                event_data[name] = value
+
+    return {
+        "channel": channel,
+        "event_id": event_id,
+        "level": level,
+        "time_created": time_created,
+        "computer": computer,
+        "provider": provider,
+        "event_data": event_data,
+    }
+
+
+# =============================================================================
+# Bookmark management (persistance disque)
+# =============================================================================
+# Les bookmarks Windows permettent de reprendre la lecture des events là
+# où on s'était arrêté après un redémarrage de l'agent. Critique pour ne
+# perdre aucun event de sécurité pendant les Windows Updates ou reboots.
+
+def _bookmark_path(bookmarks_dir: str, channel: str) -> str:
+    """Chemin disque où sauvegarder le bookmark XML d'un channel donné."""
+    # Sanitize channel name pour usage filesystem (slashes, espaces interdits)
+    safe_name = channel.replace("/", "_").replace(" ", "_").replace("\\", "_")
+    return os.path.join(bookmarks_dir, f"{safe_name}.xml")
+
+
+def _load_bookmark(bookmarks_dir: str, channel: str) -> Optional[str]:
+    """
+    Charge le bookmark XML depuis le disque s'il existe.
+
+    Retourne None si pas de bookmark (premier démarrage) ou si lecture
+    échoue (corruption). Dans ce dernier cas l'agent démarrera depuis
+    le record le plus ancien (option de fallback safe).
+    """
+    path = _bookmark_path(bookmarks_dir, channel)
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            return content if content else None
+    except OSError as exc:
+        logger.warning(
+            f"Could not load bookmark for channel '{channel}': {exc}. "
+            f"Will start from oldest record (may re-process old events)."
+        )
+        return None
+
+
+def _save_bookmark(bookmarks_dir: str, channel: str, bookmark_xml: str) -> None:
+    """
+    Sauvegarde le bookmark XML sur disque (atomic write).
+
+    Atomic write : on écrit dans un fichier temporaire puis os.replace()
+    pour éviter de corrompre le bookmark en cas de crash en cours d'écriture.
+    """
+    if not bookmark_xml:
+        return
+
+    path = _bookmark_path(bookmarks_dir, channel)
+    tmp_path = path + ".tmp"
+
+    try:
+        Path(bookmarks_dir).mkdir(parents=True, exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(bookmark_xml)
+        os.replace(tmp_path, path)  # atomic on POSIX & Windows
+    except OSError as exc:
+        logger.error(
+            f"Could not save bookmark for channel '{channel}': {exc}"
+        )
+        # On ne crash pas : au pire on re-process quelques events au prochain
+        # démarrage. L'erreur est loggée pour investigation.
+
+
+# =============================================================================
+# Classe principale : WindowsLogTailer
+# =============================================================================
+
+class WindowsLogTailer:
+    """
+    Surveille plusieurs channels Windows Event Log et appelle un callback
+    pour chaque event détecté.
+
+    L'API publique est identique à LinuxLogTailer pour permettre l'usage
+    via la façade cybersafe_agent.tailer.LogTailer (qui détecte l'OS).
+
+    Args:
+        paths: Liste de noms de channels Windows à surveiller
+            (ex: ["Security", "System", "Microsoft-Windows-PowerShell/Operational"])
+        callback: Fonction(line, source_channel) appelée pour chaque event.
+            `line` est une chaîne JSON sérialisée, `source_channel` est
+            le nom du channel.
+        poll_interval: Non utilisé (l'API Windows est push-based via
+            EvtSubscribe). Conservé pour compatibilité de signature avec
+            LinuxLogTailer.
+        bookmarks_dir: Dossier où persister les bookmarks XML
+            (default: C:\\ProgramData\\Cybersafe\\bookmarks)
+        security_event_ids: Liste des EventIDs à filtrer sur le channel
+            Security (XPath natif). Si None, utilise DEFAULT_SECURITY_EVENT_IDS.
+    """
+
+    def __init__(
+        self,
+        paths: List[str],
+        callback: Callable[[str, str], None],
+        poll_interval: float = 1.0,  # ignoré (compat signature)
+        bookmarks_dir: Optional[str] = None,
+        security_event_ids: Optional[List[int]] = None,
+    ):
+        self.channels = paths or list(DEFAULT_WINDOWS_CHANNELS)
+        self.callback = callback
+        # poll_interval ignoré : push-based via EvtSubscribe
+
+        self.bookmarks_dir = bookmarks_dir or os.environ.get(
+            "PROGRAMDATA",
+            r"C:\ProgramData"
+        ) + r"\Cybersafe\bookmarks"
+
+        self.security_event_ids = (
+            security_event_ids
+            if security_event_ids is not None
+            else list(DEFAULT_SECURITY_EVENT_IDS)
+        )
+
+        self._stop_event = threading.Event()
+        self._threads: List[threading.Thread] = []
+
+    def start(self):
+        """Démarre un thread par channel (idempotent)."""
+        if self._threads:
+            logger.warning("WindowsLogTailer.start() called twice; ignoring")
+            return
+        if not self.channels:
+            logger.warning("⚠ No Windows channels configured — tailer is idle")
+            return
+
+        # S'assurer que le dossier des bookmarks existe (peut faillir si
+        # permissions insuffisantes — on log et continue sans persistance)
+        try:
+            Path(self.bookmarks_dir).mkdir(parents=True, exist_ok=True)
+            logger.info(f"  Bookmarks dir: {self.bookmarks_dir}")
+        except OSError as exc:
+            logger.warning(
+                f"  ⚠ Bookmarks directory not writable ({exc}). "
+                f"Events may be re-processed after restart."
+            )
+
+        for channel in self.channels:
+            t = threading.Thread(
+                target=self._subscribe_loop,
+                args=(channel,),
+                daemon=True,
+                name=f"win-tailer-{channel.replace('/', '_')[:30]}",
+            )
+            t.start()
+            self._threads.append(t)
+            logger.info(f"  ✓ Watching channel: {channel}")
+
+    def stop(self):
+        """Arrête proprement tous les threads (timeout 3s par thread)."""
+        self._stop_event.set()
+        for t in self._threads:
+            t.join(timeout=3.0)
+
+    def _subscribe_loop(self, channel: str):
+        """
+        Boucle de subscription pour un channel (1 thread par channel).
+
+        Stratégie :
+          1. Build XPath query (filtre EventID si Security)
+          2. Charger bookmark depuis disque si existe (sinon start oldest)
+          3. EvtSubscribe avec wait handle (push-based)
+          4. Pour chaque event reçu : XML -> dict -> JSON -> callback
+          5. Update bookmark (mémoire + disque toutes les N events)
+          6. Au stop : sauvegarder bookmark final
+
+        Resilience :
+          - Channel inexistant -> warning + abandon ce channel
+          - Accès refusé -> error + abandon ce channel
+          - Event XML malformé -> warning + skip cet event (continue)
+        """
+        try:
+            xpath_query = _build_xpath_query(channel, self.security_event_ids)
+            existing_bookmark = _load_bookmark(self.bookmarks_dir, channel)
+
+            # Créer le bookmark : soit depuis disque, soit nouveau
+            if existing_bookmark:
+                try:
+                    bookmark_handle = win32evtlog.EvtCreateBookmark(existing_bookmark)
+                    flags = _EvtSubscribeStartAfterBookmark
+                    logger.info(
+                        f"  ↻ Channel '{channel}': resuming from saved bookmark"
+                    )
+                except pywintypes.error as exc:
+                    logger.warning(
+                        f"  ⚠ Bookmark for '{channel}' invalid ({exc}); "
+                        f"falling back to oldest record"
+                    )
+                    bookmark_handle = win32evtlog.EvtCreateBookmark(None)
+                    flags = _EvtSubscribeStartAtOldestRecord
+            else:
+                bookmark_handle = win32evtlog.EvtCreateBookmark(None)
+                flags = _EvtSubscribeStartAtOldestRecord
+
+            # Signal Windows pour réveiller le thread quand un event arrive
+            signal_event = win32event.CreateEvent(None, False, False, None)
+
+            # Subscription PUSH-based (efficient CPU)
+            subscription = win32evtlog.EvtSubscribe(
+                channel,
+                flags,
+                SignalEvent=signal_event,
+                Query=xpath_query,
+                Bookmark=bookmark_handle,
+            )
+
+        except pywintypes.error as exc:
+            # Channel inexistant (typique : Sysmon non installé) ou accès refusé
+            error_code = exc.winerror if hasattr(exc, "winerror") else 0
+            if error_code == winerror.ERROR_EVT_CHANNEL_NOT_FOUND:
+                logger.warning(
+                    f"  ⚠ Channel '{channel}' not found on this system "
+                    f"(skip — install missing component if needed, e.g. Sysmon)"
+                )
+            elif error_code == winerror.ERROR_ACCESS_DENIED:
+                logger.error(
+                    f"  ❌ Access denied to channel '{channel}'. "
+                    f"Run agent as LocalSystem or with SeSecurityPrivilege."
+                )
+            else:
+                logger.error(
+                    f"  ❌ Could not subscribe to '{channel}': {exc}"
+                )
+            return  # on abandonne ce channel, les autres continuent
+
+        # === Boucle d'attente des events ===
+        events_since_last_save = 0
+        BOOKMARK_SAVE_INTERVAL = 50  # sauvegarder tous les 50 events
+
+        while not self._stop_event.is_set():
+            wait_result = win32event.WaitForSingleObject(
+                signal_event,
+                _SUBSCRIPTION_WAIT_TIMEOUT_MS,
+            )
+
+            if wait_result == win32event.WAIT_TIMEOUT:
+                continue  # check stop_event puis re-attente
+
+            # === Récupérer les events en attente (batch) ===
+            try:
+                events = win32evtlog.EvtNext(subscription, 100, -1, 0)
+            except pywintypes.error as exc:
+                # ERROR_NO_MORE_ITEMS = file vide, normal
+                error_code = exc.winerror if hasattr(exc, "winerror") else 0
+                if error_code == winerror.ERROR_NO_MORE_ITEMS:
+                    continue
+                logger.error(
+                    f"  ❌ EvtNext failed on '{channel}': {exc}"
+                )
+                continue
+
+            # === Traiter chaque event ===
+            for event_handle in events:
+                if self._stop_event.is_set():
+                    break
+
+                try:
+                    # Rendu XML de l'event
+                    xml_str = win32evtlog.EvtFormatMessage(
+                        None,
+                        event_handle,
+                        win32evtlog.EvtFormatMessageXml,
+                    )
+
+                    # Parse XML -> dict structuré
+                    event_dict = _parse_event_xml(xml_str)
+
+                    # Sérialise en JSON one-line (consommable par parsers.windows)
+                    json_line = json.dumps(event_dict, separators=(",", ":"))
+
+                    # Update bookmark (en mémoire)
+                    win32evtlog.EvtUpdateBookmark(bookmark_handle, event_handle)
+
+                    # Appel callback agent (synchrone, comme Linux)
+                    try:
+                        self.callback(json_line, channel)
+                    except Exception as cb_exc:
+                        logger.error(
+                            f"Error in callback for channel '{channel}': {cb_exc}"
+                        )
+
+                    events_since_last_save += 1
+
+                except Exception as exc:
+                    logger.warning(
+                        f"  ⚠ Failed to process event on '{channel}': {exc}"
+                    )
+
+            # === Persistance bookmark périodique ===
+            if events_since_last_save >= BOOKMARK_SAVE_INTERVAL:
+                self._persist_bookmark(bookmark_handle, channel)
+                events_since_last_save = 0
+
+        # === Sauvegarde finale du bookmark au stop ===
+        try:
+            self._persist_bookmark(bookmark_handle, channel)
+            logger.info(f"  ✓ Channel '{channel}' bookmark saved on stop")
+        except Exception as exc:
+            logger.warning(
+                f"  ⚠ Could not save final bookmark for '{channel}': {exc}"
+            )
+
+    def _persist_bookmark(self, bookmark_handle, channel: str) -> None:
+        """Sérialise le bookmark courant en XML et le persiste sur disque."""
+        try:
+            bookmark_xml = win32evtlog.EvtRender(
+                bookmark_handle,
+                win32evtlog.EvtRenderBookmark,
+            )
+            _save_bookmark(self.bookmarks_dir, channel, bookmark_xml)
+        except pywintypes.error as exc:
+            logger.warning(
+                f"  ⚠ EvtRender bookmark failed for '{channel}': {exc}"
+            )

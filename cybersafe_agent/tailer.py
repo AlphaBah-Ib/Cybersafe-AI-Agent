@@ -1,124 +1,50 @@
 """
-Tail multi-fichiers thread-safe.
+Façade publique du tailer multi-plateforme.
 
-SOC-020 :
-- Tail en continu (suivi de la fin du fichier, comme tail -f)
-- 1 thread par fichier surveillé
-- Détecte la rotation de logs (logrotate) et ré-ouvre le fichier
-- Détecte la troncature et ré-ouvre le fichier
+Cette façade détecte le système d'exploitation au runtime et délègue
+à l'implémentation appropriée :
+  - Linux/macOS : LinuxLogTailer (fichiers /var/log/*.log via tail -f)
+  - Windows     : WindowsLogTailer (Event Log via pywin32) [Phase 2 SOC-200]
+
+L'API publique `LogTailer` reste identique à l'historique pour garantir
+zéro régression sur le code existant qui consomme cette classe (main.py).
+
+Pattern : "Factory façade" — détecte l'OS et expose un alias `LogTailer`
+qui pointe vers l'implémentation concrète. Le reste du code ne sait pas
+sur quelle plateforme il tourne, et n'a pas besoin de le savoir.
+
+Historique :
+  - SOC-020 : Implémentation Linux initiale (avant SOC-200)
+  - SOC-200 : Refactor en façade multi-plateforme (Phase 2 Windows)
 """
-import logging
-import os
-import threading
-import time
-from typing import Callable, List
+import platform as _platform_module
+
+# Détection de l'OS au moment de l'import (évalué une seule fois).
+# On utilise platform.system() qui retourne :
+#   - "Linux"   sur Linux
+#   - "Darwin"  sur macOS
+#   - "Windows" sur Windows
+_OS_NAME = _platform_module.system()
 
 
-logger = logging.getLogger("cybersafe.tailer")
+if _OS_NAME == "Windows":
+    # Phase 2 SOC-200 — Implémentation Windows via Event Log + pywin32.
+    # Cet import lèvera ImportError si pywin32 n'est pas installé,
+    # ce qui est le comportement souhaité (fail-fast au démarrage).
+    from .platforms.windows import WindowsLogTailer as LogTailer  # noqa: F401
+
+elif _OS_NAME in ("Linux", "Darwin"):
+    # Implémentation historique pour Linux et macOS (lecture fichiers
+    # via tail -f avec détection de rotation logrotate).
+    from .platforms.linux import LinuxLogTailer as LogTailer  # noqa: F401
+
+else:
+    # OS non supporté : on lève une erreur explicite au démarrage
+    # plutôt que de laisser un comportement imprévisible.
+    raise RuntimeError(
+        f"Système d'exploitation non supporté par Cybersafe Agent : "
+        f"'{_OS_NAME}'. Plateformes supportées : Linux, macOS, Windows."
+    )
 
 
-class LogTailer:
-    """
-    Surveille plusieurs fichiers de log et appelle un callback
-    pour chaque nouvelle ligne détectée.
-
-    Args:
-        paths: Liste de chemins absolus à surveiller
-        callback: Fonction(line, source_path) appelée pour chaque ligne
-        poll_interval: Intervalle entre 2 polls (secondes)
-    """
-
-    def __init__(
-        self,
-        paths: List[str],
-        callback: Callable[[str, str], None],
-        poll_interval: float = 1.0,
-    ):
-        self.paths = paths
-        self.callback = callback
-        self.poll_interval = poll_interval
-
-        self._stop_event = threading.Event()
-        self._threads: List[threading.Thread] = []
-
-    def start(self):
-        """Démarre un thread par fichier (idempotent)."""
-        if self._threads:
-            logger.warning("LogTailer.start() called twice; ignoring second call")
-            return
-        if not self.paths:
-            logger.warning("⚠ No source files configured — tailer is idle")
-            return
-        for path in self.paths:
-            t = threading.Thread(
-                target=self._tail_loop,
-                args=(path,),
-                daemon=True,
-                name=f"tailer-{os.path.basename(path)}",
-            )
-            t.start()
-            self._threads.append(t)
-
-    def stop(self):
-        """Arrête proprement tous les threads."""
-        self._stop_event.set()
-        for t in self._threads:
-            t.join(timeout=3.0)
-
-    def _tail_loop(self, path: str):
-        """Boucle de tail pour un fichier (1 thread par fichier)."""
-        logger.info(f"  ✓ Watching: {path}")
-
-        while not self._stop_event.is_set():
-            try:
-                with open(path, "r", errors="replace") as f:
-                    f.seek(0, os.SEEK_END)
-                    inode = os.fstat(f.fileno()).st_ino
-
-                    while not self._stop_event.is_set():
-                        line = f.readline()
-                        if line:
-                            line = line.rstrip("\n")
-                            if line:
-                                try:
-                                    self.callback(line, path)
-                                except Exception as e:
-                                    logger.error(
-                                        f"Error in callback for {path}: {e}"
-                                    )
-                            continue
-
-                        # Pas de nouvelle ligne → check rotation + sleep
-                        time.sleep(self.poll_interval)
-
-                        # Détection rotation : inode changé OU fichier tronqué
-                        try:
-                            current_inode = os.stat(path).st_ino
-                            if current_inode != inode:
-                                logger.info(
-                                    f"  ↻ Log rotated: {path} (re-opening)"
-                                )
-                                break  # ré-ouverture via boucle externe
-                            # Tronqué ?
-                            if f.tell() > os.fstat(f.fileno()).st_size:
-                                logger.info(
-                                    f"  ↻ Log truncated: {path} (re-opening)"
-                                )
-                                break
-                        except FileNotFoundError:
-                            logger.warning(f"  ⚠ File disappeared: {path}")
-                            time.sleep(2.0)
-                            break
-
-            except PermissionError:
-                logger.error(
-                    f"  ❌ Permission denied: {path} "
-                    f"(run with sudo or fix groups)"
-                )
-                return  # on abandonne ce fichier
-            except FileNotFoundError:
-                logger.warning(f"  ⚠ File not found: {path} (waiting...)")
-                time.sleep(5.0)
-            except Exception as e:
-                logger.error(f"  ❌ Unexpected error on {path}: {e}")
-                time.sleep(5.0)
+__all__ = ["LogTailer"]

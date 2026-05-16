@@ -1,0 +1,209 @@
+# .github/workflows/build-windows.yml
+#
+# Cybersafe-AI Agent — Windows build workflow (SOC-200 Phase 2)
+#
+# Automatically builds the Windows .exe via PyInstaller when:
+#   - A version tag (vX.Y.Z) is pushed
+#   - The workflow is manually triggered (workflow_dispatch)
+#
+# The built artifact is:
+#   1. Uploaded as a workflow artifact (downloadable from Actions tab)
+#   2. Attached to the GitHub Release (if triggered by a tag)
+#
+# Build environment:
+#   - windows-latest (Windows Server 2022 currently)
+#   - Python 3.11 (LTS, compatible with PyInstaller 6.x)
+#
+# See docs/adr/ADR-001-windows-agent-stack.md for the architectural rationale.
+
+name: Build Windows Agent
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional release tag to create (e.g. v1.0.0-test). Leave empty for artifact-only.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # required to create GitHub Releases
+
+jobs:
+  build:
+    name: Build .exe on windows-latest
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      # =====================================================================
+      # Step 1: Checkout source
+      # =====================================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history (needed for release notes generation)
+
+      # =====================================================================
+      # Step 2: Set up Python 3.11 with pip cache
+      # =====================================================================
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      # =====================================================================
+      # Step 3: Determine version string (from tag, manual input, or fallback)
+      # =====================================================================
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+              $version = $env:GITHUB_REF -replace 'refs/tags/v', ''
+              Write-Host "Detected version from tag: $version"
+          } elseif ($env:WORKFLOW_INPUT_TAG -and $env:WORKFLOW_INPUT_TAG.StartsWith('v')) {
+              $version = $env:WORKFLOW_INPUT_TAG -replace '^v', ''
+              Write-Host "Detected version from workflow_dispatch input: $version"
+          } else {
+              $version = "0.0.0-dev-$($env:GITHUB_SHA.Substring(0,7))"
+              Write-Host "No tag detected; using fallback version: $version"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        env:
+          WORKFLOW_INPUT_TAG: ${{ github.event.inputs.release_tag }}
+
+      # =====================================================================
+      # Step 4: Upgrade pip + install agent dependencies
+      # =====================================================================
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -r requirements.txt
+          pip install 'pyinstaller>=6.0'
+
+      # =====================================================================
+      # Step 5: Run smoke tests (catch obvious regressions before building)
+      # =====================================================================
+      - name: Smoke test - import all modules
+        shell: pwsh
+        run: |
+          python -c "from cybersafe_agent.config import AgentConfig; print('config OK')"
+          python -c "from cybersafe_agent.parser import line_to_event; print('parser facade OK')"
+          python -c "from cybersafe_agent.parsers.linux import line_to_event; print('parsers/linux OK')"
+          python -c "from cybersafe_agent.parsers.windows import line_to_event, WINDOWS_EVENT_MAPPING; print(f'parsers/windows OK ({len(WINDOWS_EVENT_MAPPING)} EventIDs mapped)')"
+          python -c "from cybersafe_agent.tailer import LogTailer; print(f'tailer facade OK -> {LogTailer.__name__}')"
+          python -c "from cybersafe_agent.platforms.windows import WindowsLogTailer, DEFAULT_WINDOWS_CHANNELS, DEFAULT_SECURITY_EVENT_IDS; print(f'WindowsLogTailer OK ({len(DEFAULT_WINDOWS_CHANNELS)} channels, {len(DEFAULT_SECURITY_EVENT_IDS)} EventIDs)')"
+
+      # =====================================================================
+      # Step 6: Build the .exe via PyInstaller
+      # =====================================================================
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller `
+            packaging/windows/cybersafe-agent.spec `
+            --clean `
+            --noconfirm `
+            --log-level=WARN
+
+      # =====================================================================
+      # Step 7: Verify the build output
+      # =====================================================================
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $exePath = "dist\cybersafe-agent\cybersafe-agent.exe"
+          if (-not (Test-Path $exePath)) {
+              Write-Error "Build failed: $exePath not found"
+              exit 1
+          }
+
+          $size = (Get-Item $exePath).Length / 1MB
+          $folderSize = (Get-ChildItem dist\cybersafe-agent -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "Built: $exePath ($([math]::Round($size, 2)) MB exe / $([math]::Round($folderSize, 2)) MB folder)"
+
+          # Sanity check: folder should be 30-100 MB (catch broken builds)
+          if ($folderSize -lt 20 -or $folderSize -gt 200) {
+              Write-Warning "Unusual folder size: $folderSize MB (expected 30-100 MB)"
+          }
+
+      # =====================================================================
+      # Step 8: Bundle distribution files into dist\cybersafe-agent\
+      # =====================================================================
+      - name: Bundle distribution files
+        shell: pwsh
+        run: |
+          $dest = "dist\cybersafe-agent"
+          Copy-Item -Path "config.example.yaml" -Destination $dest
+          Copy-Item -Path "packaging\windows\install.ps1" -Destination $dest
+          Copy-Item -Path "packaging\windows\uninstall.ps1" -Destination $dest
+          Copy-Item -Path "packaging\windows\README-Windows.md" -Destination $dest
+          Write-Host "Bundled distribution files into $dest"
+
+      # =====================================================================
+      # Step 9: Create the distribution zip
+      # =====================================================================
+      - name: Create distribution zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $zipName = "cybersafe-agent-windows-v$version.zip"
+          Compress-Archive `
+            -Path "dist\cybersafe-agent" `
+            -DestinationPath "dist\$zipName" `
+            -CompressionLevel Optimal
+
+          $zipSize = [math]::Round((Get-Item "dist\$zipName").Length / 1MB, 2)
+          Write-Host "Created dist\$zipName ($zipSize MB)"
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        id: zip
+
+      # =====================================================================
+      # Step 10: Upload artifact (always, downloadable from Actions UI)
+      # =====================================================================
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cybersafe-agent-windows-v${{ steps.version.outputs.version }}
+          path: dist/${{ steps.zip.outputs.zip_name }}
+          retention-days: 30
+          compression-level: 0   # already compressed (zip inside artifact)
+
+      # =====================================================================
+      # Step 11: Create GitHub Release and attach the zip (tag push only)
+      # =====================================================================
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Cybersafe Agent ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: dist/${{ steps.zip.outputs.zip_name }}
+          body: |
+            # Cybersafe Agent ${{ github.ref_name }} — Windows build
+
+            Windows agent for Cybersafe-AI SOC, built automatically by GitHub Actions.
+
+            ## Installation
+
+            1. Download `${{ steps.zip.outputs.zip_name }}` below
+            2. Extract the zip
+            3. Open PowerShell **as Administrator** in the extracted folder
+            4. Run `.\install.ps1`
+
+            See `README-Windows.md` inside the zip for detailed instructions.
+
+            ## Verification
+
+            Built from commit `${{ github.sha }}` on `${{ github.run_started_at }}`.
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

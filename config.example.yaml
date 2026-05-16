@@ -51,3 +51,77 @@ tail_poll_interval: 1.0       # Vérification toutes les 1s
 retry_max_attempts: 6
 retry_base_delay: 1.0
 retry_max_delay: 60.0
+
+# ════════════════════════════════════════════════════════════════════════
+# Windows Event Log — SOC-200 Phase 2 (ignoré sur Linux/macOS)
+# ════════════════════════════════════════════════════════════════════════
+# Cette section configure les channels Event Log à surveiller sur Windows.
+# Sur Linux/macOS, elle est ignorée (l agent utilise la section sources: ci-dessus).
+#
+# Si la section windows: est absente ou vide, l agent Windows utilisera les
+# valeurs par défaut alignées MITRE ATT&CK (voir docs/adr/ADR-001).
+#
+# Documentation complète : docs/adr/ADR-001-windows-agent-stack.md
+
+# windows:
+#   # ── Channels Event Log à surveiller ──────────────────────────────
+#   # Sélection ciblée sécurité (alignée MITRE ATT&CK + CIS Benchmarks).
+#   # Le channel Sysmon est optionnel — skip silencieux si non installé.
+#   channels:
+#     # Tier 1 — Sécurité critique
+#     - Security                                              # Auth, ACL, élévations
+#     - System                                                # Services, drivers, kernel
+#
+#     # Tier 2 — Attaques modernes
+#     - Microsoft-Windows-PowerShell/Operational              # Scripts PowerShell
+#     - Microsoft-Windows-Windows Defender/Operational        # Malware, scans, quarantaines
+#
+#     # Tier 3 — Persistance & lateral movement
+#     - Microsoft-Windows-TaskScheduler/Operational           # Tâches planifiées
+#     - Microsoft-Windows-WinRM/Operational                   # Connexions remote admin
+#     - Microsoft-Windows-TerminalServices-LocalSessionManager/Operational  # RDP
+#
+#     # Bonus (si Sysmon installé)
+#     - Microsoft-Windows-Sysmon/Operational                  # EDR-like events
+#
+#   # ── Filtrage EventIDs sur le channel Security ────────────────────
+#   # XPath natif côté kernel Windows (économie CPU massive).
+#   # Pour les autres channels, tous les events sont remontés.
+#   security_event_ids:
+#     # Authentication (TA0001 / TA0006 MITRE ATT&CK)
+#     - 4624    # Successful logon
+#     - 4625    # Failed logon (brute force detection)
+#     - 4647    # User initiated logoff
+#     - 4648    # Logon with explicit credentials (lateral movement)
+#     - 4672    # Special privileges assigned (admin login)
+#     - 4673    # Sensitive privilege use
+#
+#     # Process & Service (TA0002 / TA0003)
+#     - 4688    # Process created (KEY visibility)
+#     - 4697    # Service installed (persistence)
+#
+#     # Object access (TA0009)
+#     - 4663    # Object access (file/registry)
+#
+#     # Audit policy — CRITIQUE (attaquant efface ses traces)
+#     - 4719    # System audit policy changed
+#     - 1102    # Audit log cleared
+#
+#     # Account management (TA0003 / TA0004)
+#     - 4720    # User account created
+#     - 4722    # User account enabled
+#     - 4724    # Password reset attempt
+#     - 4725    # User account disabled
+#     - 4728    # User added to security group
+#     - 4732    # Member added to local group
+#     - 4738    # User account changed
+#
+#     # Kerberos (TA0006 — environnements Active Directory)
+#     - 4768    # TGT requested
+#     - 4769    # Service ticket requested
+#
+#   # ── Persistance des bookmarks (récupération après reboot) ────────
+#   # Dossier où l agent sauvegarde les bookmarks XML Windows.
+#   # Permet de ne pas perdre d events après un Windows Update / reboot.
+#   # Doit être writable par le compte de service de l agent.
+#   bookmarks_dir: C:\\ProgramData\\Cybersafe\\bookmarks

@@ -24,7 +24,7 @@ CONFIG_DIR="/etc/cybersafe"
 STATE_DIR="/var/lib/cybersafe"
 SPOOL_DIR="/var/spool/cybersafe"
 SERVICE_NAME="cybersafe-agent"
-SERVICE_FILE_SRC="systemd/${SERVICE_NAME}.service"
+SERVICE_FILE_SRC="packaging/linux/systemd/${SERVICE_NAME}.service"
 SERVICE_FILE_DST="/etc/systemd/system/${SERVICE_NAME}.service"
 PYTHON_MIN_VERSION="3.10"
 

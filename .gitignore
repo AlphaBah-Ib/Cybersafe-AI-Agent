@@ -37,3 +37,9 @@ agent.py.poc.bak
 # OS
 .DS_Store
 Thumbs.db
+
+# PyInstaller build artifacts (SOC-200 Phase 2 Windows)
+build/
+dist/
+build-venv/
+*.spec.bak
