@@ -221,31 +221,11 @@ jobs:
           Write-Host "Source directory : $sourceDir"
           Write-Host "Internal directory: $internalDir"
           Write-Host ""
-          # =========================================================
-          # Debug temporaire SOC-204 : localiser WixCA.dll pour CustomActions
-          # Sera retire une fois le bon path identifie
-          # =========================================================
-          Write-Host "=== Debug WixCA.dll : contenu de wixBin ==="
-          Get-ChildItem -Path $wixBin -Filter "*.dll" -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
-          Write-Host ""
-          Write-Host "=== Debug WixCA.dll : recherche recursive ==="
-          $wixRoot = Split-Path $wixBin -Parent
-          Write-Host "wixRoot = $wixRoot"
-          Get-ChildItem -Path $wixRoot -Filter "WixCA*" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
-          Write-Host ""
-          Write-Host "=== Debug : env WIX ==="
-          Write-Host "env:WIX = $env:WIX"
-          if ($env:WIX) {
-              Get-ChildItem -Path $env:WIX -Filter "WixCA*" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
-          }
-          Write-Host ""
-
           Write-Host "Step A : candle.exe (compile)"
           & "$wixBin\candle.exe" `
               -arch x64 `
               -ext WixUIExtension `
               -ext WixUtilExtension `
-              -ext WixCAExtension `
               -dSourceDir="$sourceDir" `
               -dInternalDir="$internalDir" `
               -out "dist\" `
@@ -260,7 +240,6 @@ jobs:
           & "$wixBin\light.exe" `
               -ext WixUIExtension `
               -ext WixUtilExtension `
-              -ext WixCAExtension `
               -spdb `
               -out "dist\$msiName" `
               "dist\Product.wixobj" `
