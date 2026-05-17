@@ -249,6 +249,28 @@
                         Remove="uninstall"
                         Wait="yes" />
 
+        <!-- ============================================================
+             Surcharge ImagePath du service Windows
+             ============================================================
+             WiX 3.x n'a pas d'attribut Arguments sur ServiceInstall.
+             On surcharge donc la cle de registre ImagePath ecrite par
+             ServiceInstall, en y ajoutant le flag de mode service.
+
+             Sans ce flag, le binaire tourne en mode console et ne
+             signale jamais SERVICE_RUNNING au SCM, ce qui provoque
+             un timeout apres 30 secondes (Event ID 1053 / 7000 / 7009).
+
+             Avec ce flag, le binaire instancie un wrapper pywin32
+             ServiceFramework qui signale RUNNING immediatement.
+
+             Le format ImagePath exige des guillemets autour du path
+             car le dossier d'install contient un espace. -->
+        <RegistryValue Root="HKLM"
+                       Key="SYSTEM\CurrentControlSet\Services\CybersafeAgent"
+                       Name="ImagePath"
+                       Type="expandable"
+                       Value="&quot;[#CybersafeAgentExe]&quot; --service" />
+
       </Component>
     </DirectoryRef>
 
