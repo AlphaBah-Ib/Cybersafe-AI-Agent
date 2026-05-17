@@ -64,6 +64,7 @@ except ImportError as exc:  # pragma: no cover
 DEFAULT_WINDOWS_CHANNELS = [
     "Security",                                          # Tier 1
     "System",                                            # Tier 1
+    "Application",                                       # Tier 1 (legacy apps)
     "Microsoft-Windows-PowerShell/Operational",          # Tier 2 (scripts)
     "Microsoft-Windows-Windows Defender/Operational",    # Tier 2 (AV)
     "Microsoft-Windows-TaskScheduler/Operational",       # Tier 3 (persist)
