@@ -62,7 +62,10 @@
     <!-- ==================================================================
          Media : un seul fichier CAB embarque dans le MSI
          ================================================================== -->
-    <Media Id="1" Cabinet="cybersafe-agent.cab" EmbedCab="yes" />
+    <!-- Cabinet name : doit respecter format 8.3 (court, sans tiret/espace)
+         ou etre en short name pour eviter erreur ICE03 'Bad cabinet syntax'.
+         'csa' = abbreviation Cybersafe Agent. -->
+    <Media Id="1" Cabinet="csa.cab" EmbedCab="yes" />
 
     <!-- ==================================================================
          Properties : variables MSI
