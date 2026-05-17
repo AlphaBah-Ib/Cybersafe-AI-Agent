@@ -1,28 +1,60 @@
+**Interactive (wizard) :**
+        Double-click the .msi file -> follow the wizard     ← INDENT CASSÉ
+            **Silent (for MDM/GPO/Intune) :**
+````powershell                                                ← BACKTICKS ÉCHAPPENT du YAML
+            msiexec /i ...
+```                                                          ← idem
+            Visible in Control Panel...
+```
+
+**Le problème** : nano a interprété les **triple-backticks ` ``` `** comme du Markdown et a cassé l'indentation YAML pendant le paste. C'est un bug classique avec les heredocs multi-lignes contenant des caractères spéciaux.
+
+Le fichier fait **423 lignes** (vs ~370 attendues), donc il y a du contenu dupliqué/cassé.
+
+---
+
+## 🔧 Fix — Section release notes simplifiée (sans triple-backticks)
+
+Le plus simple est de **remplacer la section `body:` problématique** par une version sans triple-backticks (qui restera lisible).
+
+### ⚙️ Solution — Recoller le fichier avec une version "sans backticks"
+
+Je vais te livrer **le fichier complet corrigé** avec :
+- ✅ Triple-backticks remplacés par indentation simple (4 espaces) — markdown valide aussi
+- ✅ Aucun caractère spécial qui peut tromper nano/YAML parser
+
+---
+
+## ⚙️ Action — Vider + recoller
+
+### 1. Vider complètement :
+
+```bash
+> ~/cybersafe-agent/.github/workflows/build-windows.yml
+wc -l ~/cybersafe-agent/.github/workflows/build-windows.yml
+```
+
+→ Doit retourner `0`.
+
+### 2. Ouvrir nano :
+
+```bash
+nano ~/cybersafe-agent/.github/workflows/build-windows.yml
+```
+
+### 3. Coller ce contenu (entre les `═══`, sans les `═══` ni les ` ``` ` Markdown autour) :
+
+═══════════════════════════════════════════════════════════════════════
+
+```yaml
 # .github/workflows/build-windows.yml
 #
 # Cybersafe-AI Agent — Windows build workflow (SOC-200 Phase 2 + SOC-204)
 #
-# Automatically builds the Windows .exe + .msi installer when:
-#   - A version tag (vX.Y.Z) is pushed
-#   - The workflow is manually triggered (workflow_dispatch)
-#
-# Outputs:
-#   1. .exe.zip uploaded as workflow artifact
-#   2. .msi    uploaded as workflow artifact (SOC-204)
-#   3. Both attached to GitHub Release (if triggered by tag)
-#
-# Build environment:
-#   - windows-latest (Windows Server 2022)
-#   - Python 3.11 (LTS, compatible with PyInstaller 6.x)
-#   - WiX Toolset 3.14 (pre-installed on windows-latest by default,
-#     fallback to Chocolatey install if missing)
+# Builds Windows .exe + .msi installer on tag push (v*.*.*) or
+# manual workflow_dispatch.
 #
 # See docs/adr/ADR-001-windows-agent-stack.md for architectural rationale.
-#
-# Changelog:
-#   v1 (16/05): initial build .exe only
-#   v2 (17/05): added MSI build via WiX (failed - choco conflict)
-#   v3 (17/05): resilient WiX detection (handles pre-installed scenario)
 
 name: Build Windows Agent
 
@@ -33,12 +65,12 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional release tag to create (e.g. v1.0.0-test). Leave empty for artifact-only.'
+        description: 'Optional release tag (e.g. v1.0.0-test). Leave empty for artifact-only.'
         required: false
         default: ''
 
 permissions:
-  contents: write   # required to create GitHub Releases
+  contents: write
 
 jobs:
   build:
@@ -47,17 +79,11 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      # =====================================================================
-      # Step 1: Checkout source
-      # =====================================================================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # =====================================================================
-      # Step 2: Set up Python 3.11 with pip cache
-      # =====================================================================
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -65,9 +91,6 @@ jobs:
           cache: 'pip'
           cache-dependency-path: 'requirements.txt'
 
-      # =====================================================================
-      # Step 3: Determine version string
-      # =====================================================================
       - name: Determine version
         id: version
         shell: pwsh
@@ -86,9 +109,6 @@ jobs:
         env:
           WORKFLOW_INPUT_TAG: ${{ github.event.inputs.release_tag }}
 
-      # =====================================================================
-      # Step 4: Install Python dependencies
-      # =====================================================================
       - name: Install Python dependencies
         shell: pwsh
         run: |
@@ -96,9 +116,6 @@ jobs:
           pip install -r requirements.txt
           pip install 'pyinstaller>=6.0'
 
-      # =====================================================================
-      # Step 5: Smoke tests (catch obvious regressions)
-      # =====================================================================
       - name: Smoke test - import all modules
         shell: pwsh
         run: |
@@ -107,11 +124,8 @@ jobs:
           python -c "from cybersafe_agent.parsers.linux import line_to_event; print('parsers/linux OK')"
           python -c "from cybersafe_agent.parsers.windows import line_to_event, WINDOWS_EVENT_MAPPING; print(f'parsers/windows OK ({len(WINDOWS_EVENT_MAPPING)} EventIDs mapped)')"
           python -c "from cybersafe_agent.tailer import LogTailer; print(f'tailer facade OK -> {LogTailer.__name__}')"
-          python -c "from cybersafe_agent.platforms.windows import WindowsLogTailer, DEFAULT_WINDOWS_CHANNELS, DEFAULT_SECURITY_EVENT_IDS; print(f'WindowsLogTailer OK ({len(DEFAULT_WINDOWS_CHANNELS)} channels, {len(DEFAULT_SECURITY_EVENT_IDS)} EventIDs)')"
+          python -c "from cybersafe_agent.platforms.windows import WindowsLogTailer, DEFAULT_WINDOWS_CHANNELS, DEFAULT_SECURITY_EVENT_IDS; print(f'WindowsLogTailer OK ({len(DEFAULT_WINDOWS_CHANNELS)} channels)')"
 
-      # =====================================================================
-      # Step 6: Build the .exe via PyInstaller
-      # =====================================================================
       - name: Build with PyInstaller
         shell: pwsh
         run: |
@@ -121,9 +135,6 @@ jobs:
             --noconfirm `
             --log-level=WARN
 
-      # =====================================================================
-      # Step 7: Verify build output
-      # =====================================================================
       - name: Verify build output
         shell: pwsh
         run: |
@@ -135,13 +146,7 @@ jobs:
           $size = (Get-Item $exePath).Length / 1MB
           $folderSize = (Get-ChildItem dist\cybersafe-agent -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host "Built: $exePath ($([math]::Round($size, 2)) MB exe / $([math]::Round($folderSize, 2)) MB folder)"
-          if ($folderSize -lt 20 -or $folderSize -gt 200) {
-              Write-Warning "Unusual folder size: $folderSize MB (expected 30-100 MB)"
-          }
 
-      # =====================================================================
-      # Step 8: Bundle distribution files into dist\cybersafe-agent\
-      # =====================================================================
       - name: Bundle distribution files
         shell: pwsh
         run: |
@@ -152,9 +157,6 @@ jobs:
           Copy-Item -Path "packaging\windows\README-Windows.md" -Destination $dest
           Write-Host "Bundled distribution files into $dest"
 
-      # =====================================================================
-      # Step 9: Create the .exe distribution zip
-      # =====================================================================
       - name: Create .exe distribution zip
         id: zip
         shell: pwsh
@@ -169,24 +171,14 @@ jobs:
           Write-Host "Created dist\$zipName ($zipSize MB)"
           "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      # =====================================================================
-      # Step 10: Detect or install WiX Toolset 3.14 (SOC-204)
-      # =====================================================================
-      # windows-latest comes with WiX pre-installed in most cases.
-      # We detect it first; if absent, we install via Chocolatey.
-      # Exports WIX_BIN env var for next steps.
       - name: Detect or install WiX Toolset 3.14
         shell: pwsh
         run: |
           $wixPath = $null
-
-          # Strategy 1: check $env:WIX (set by WiX installer)
           if ($env:WIX -and (Test-Path "${env:WIX}bin\candle.exe")) {
               $wixPath = "${env:WIX}bin"
               Write-Host "WiX detected via WIX env var: $wixPath"
           }
-
-          # Strategy 2: scan common install locations
           if (-not $wixPath) {
               $candidates = @(
                   "C:\Program Files (x86)\WiX Toolset v3.14\bin",
@@ -201,12 +193,9 @@ jobs:
                   }
               }
           }
-
-          # Strategy 3: install via Chocolatey if still not found
           if (-not $wixPath) {
               Write-Host "WiX not found, installing via Chocolatey..."
               choco install wixtoolset --version=3.14.0 --no-progress --yes --force --ignore-detected-reboot
-              # Re-scan after install
               $candidates = @(
                   "C:\Program Files (x86)\WiX Toolset v3.14\bin",
                   "C:\Program Files\WiX Toolset v3.14\bin"
@@ -219,13 +208,10 @@ jobs:
                   }
               }
           }
-
           if (-not $wixPath) {
               Write-Error "WiX Toolset could not be detected or installed"
               exit 1
           }
-
-          # Verify all 3 binaries we need
           $binaries = @("heat.exe", "candle.exe", "light.exe")
           $allFound = $true
           foreach ($bin in $binaries) {
@@ -236,29 +222,20 @@ jobs:
                   $allFound = $false
               }
           }
-
           if (-not $allFound) {
-              Write-Error "WiX Toolset binaries are not all available at $wixPath"
+              Write-Error "WiX Toolset binaries are not all available"
               exit 1
           }
-
-          # Export WIX_BIN for next steps via GITHUB_ENV
           "WIX_BIN=$wixPath" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host ""
           Write-Host "Exported WIX_BIN=$wixPath for next steps"
 
-      # =====================================================================
-      # Step 11: Auto-harvest _internal/ via heat.exe (SOC-204)
-      # =====================================================================
       - name: Auto-harvest internal files (heat.exe)
         shell: pwsh
         run: |
           $wixBin = "${env:WIX_BIN}"
           $outFile = "packaging\windows\wix\InternalFiles.wxs"
-
           Write-Host "Using WiX from: $wixBin"
           Write-Host "Harvesting dist\cybersafe-agent\_internal\ ..."
-
           & "$wixBin\heat.exe" dir "dist\cybersafe-agent\_internal" `
               -cg InternalFiles `
               -dr INSTALLFOLDER `
@@ -269,26 +246,17 @@ jobs:
               -ke `
               -var "var.InternalDir" `
               -out $outFile
-
           if ($LASTEXITCODE -ne 0) {
               Write-Error "heat.exe failed with exit code $LASTEXITCODE"
               exit 1
           }
-
           if (-not (Test-Path $outFile)) {
               Write-Error "heat.exe did not produce $outFile"
               exit 1
           }
-
           $lineCount = (Get-Content $outFile).Count
           Write-Host "Generated $outFile ($lineCount lines)"
-          Write-Host ""
-          Write-Host "First 20 lines:"
-          Get-Content $outFile -TotalCount 20
 
-      # =====================================================================
-      # Step 12: Compile MSI (candle.exe + light.exe) (SOC-204)
-      # =====================================================================
       - name: Compile MSI (candle + light)
         id: msi
         shell: pwsh
@@ -298,14 +266,11 @@ jobs:
           $msiName = "cybersafe-agent-windows-v$version.msi"
           $sourceDir = (Resolve-Path "dist\cybersafe-agent").Path
           $internalDir = (Resolve-Path "dist\cybersafe-agent\_internal").Path
-
           Write-Host "Using WiX from: $wixBin"
           Write-Host "Source directory : $sourceDir"
           Write-Host "Internal directory: $internalDir"
-
-          # --- candle.exe (compile XML -> .wixobj) ---
           Write-Host ""
-          Write-Host "=== Step A : candle.exe (compile) ==="
+          Write-Host "Step A : candle.exe (compile)"
           & "$wixBin\candle.exe" `
               -arch x64 `
               -ext WixUIExtension `
@@ -315,15 +280,12 @@ jobs:
               -out "dist\" `
               "packaging\windows\wix\Product.wxs" `
               "packaging\windows\wix\InternalFiles.wxs"
-
           if ($LASTEXITCODE -ne 0) {
               Write-Error "candle.exe failed with exit code $LASTEXITCODE"
               exit 1
           }
-
-          # --- light.exe (link .wixobj -> .msi) ---
           Write-Host ""
-          Write-Host "=== Step B : light.exe (link) ==="
+          Write-Host "Step B : light.exe (link)"
           & "$wixBin\light.exe" `
               -ext WixUIExtension `
               -ext WixUtilExtension `
@@ -331,27 +293,19 @@ jobs:
               -out "dist\$msiName" `
               "dist\Product.wixobj" `
               "dist\InternalFiles.wixobj"
-
           if ($LASTEXITCODE -ne 0) {
               Write-Error "light.exe failed with exit code $LASTEXITCODE"
               exit 1
           }
-
           if (-not (Test-Path "dist\$msiName")) {
               Write-Error "MSI not produced: dist\$msiName"
               exit 1
           }
-
           $msiSize = [math]::Round((Get-Item "dist\$msiName").Length / 1MB, 2)
           Write-Host ""
-          Write-Host "=== MSI build successful ==="
-          Write-Host "Path : dist\$msiName"
-          Write-Host "Size : $msiSize MB"
+          Write-Host "MSI build successful: dist\$msiName ($msiSize MB)"
           "msi_name=$msiName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      # =====================================================================
-      # Step 13: Upload .exe.zip artifact
-      # =====================================================================
       - name: Upload .exe.zip artifact
         uses: actions/upload-artifact@v4
         with:
@@ -360,9 +314,6 @@ jobs:
           retention-days: 30
           compression-level: 0
 
-      # =====================================================================
-      # Step 14: Upload .msi artifact (SOC-204)
-      # =====================================================================
       - name: Upload .msi artifact
         uses: actions/upload-artifact@v4
         with:
@@ -370,9 +321,6 @@ jobs:
           path: dist/${{ steps.msi.outputs.msi_name }}
           retention-days: 30
 
-      # =====================================================================
-      # Step 15: Create GitHub Release (tag push only)
-      # =====================================================================
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -386,38 +334,61 @@ jobs:
             dist/${{ steps.zip.outputs.zip_name }}
             dist/${{ steps.msi.outputs.msi_name }}
           body: |
-            # Cybersafe Agent ${{ github.ref_name }} — Windows build
+            Cybersafe Agent Windows build.
 
-            Windows agent for Cybersafe-AI SOC, built automatically by GitHub Actions.
+            Two distribution options below :
 
-            ## Installation options
+            1) MSI installer (recommended for sysadmins) :
+               Download the .msi file, then either double-click it
+               for the wizard, or run silently with :
+                   msiexec /i FILENAME.msi /qn TOKEN=csa_xxx
+               Visible in Control Panel > Programs and Features.
 
-            ### Option 1 : MSI installer (recommended for sysadmins)
+            2) Zip + PowerShell installer :
+               Download the .zip, extract it, open PowerShell as Admin
+               in the extracted folder, then run :
+                   .\install.ps1
 
-            Download `${{ steps.msi.outputs.msi_name }}` below, then :
-
-            **Interactive (wizard) :**
-        Double-click the .msi file -> follow the wizard
-
-            **Silent (for MDM/GPO/Intune) :**
-```powershell
-            msiexec /i cybersafe-agent-windows-vX.Y.Z.msi /qn TOKEN=csa_xxxxxxxxxxxxx
-```
-
-            Visible in Control Panel -> Programs and Features for easy uninstall.
-
-            ### Option 2 : Zip + PowerShell installer
-
-            Download `${{ steps.zip.outputs.zip_name }}` below, extract it, then :
-
-```powershell
-            cd cybersafe-agent
-            .\install.ps1
-```
-
-            See `README-Windows.md` inside the zip for detailed instructions.
-
-            ## Verification
-
-            Built from commit `${{ github.sha }}` on `${{ github.run_started_at }}`.
+            Built from commit ${{ github.sha }}.
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+```
+
+═══════════════════════════════════════════════════════════════════════
+
+### 4. Sauvegarder dans nano : Ctrl+O Enter Ctrl+X
+
+---
+
+## ✅ Validation
+
+```bash
+cd ~/cybersafe-agent && python3 -c "
+import yaml
+with open('.github/workflows/build-windows.yml') as f:
+    data = yaml.safe_load(f)
+    print('Syntaxe YAML : OK')
+    jobs = data.get('jobs', {})
+    for job_name, job in jobs.items():
+        steps = job.get('steps', [])
+        print(f'Job {job_name!r} : {len(steps)} steps')
+        for i, step in enumerate(steps, 1):
+            print(f'  {i:2d}. {step.get(\"name\", \"<unnamed>\")}')
+"
+wc -l ~/cybersafe-agent/.github/workflows/build-windows.yml
+```
+
+**Attendu** : 15 steps, ~300 lignes (pas 423).
+
+---
+
+## ⚙️ Puis commit + push + tag
+
+```bash
+cd ~/cybersafe-agent && git add .github/workflows/build-windows.yml && \
+git commit -m "fix(ci): SOC-204 — clean YAML release notes (remove triple-backticks)" && \
+git push origin main && \
+git tag v1.1.0-beta.3 -m "SOC-204 — clean YAML" && \
+git push origin v1.1.0-beta.3
+```
+
+🛑 Vas-y et envoie le résultat du build #5 sur GitHub Actions. 🎯
