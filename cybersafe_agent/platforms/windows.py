@@ -424,10 +424,14 @@ class WindowsLogTailer:
                         f"  ⚠ Bookmark for '{channel}' invalid ({exc}); "
                         f"falling back to oldest record"
                     )
-                    bookmark_handle = win32evtlog.EvtCreateBookmark(None)
+                    # API Windows : Bookmark doit etre None quand flags=StartAtOldestRecord
+                    # (sinon EvtSubscribe -> ERROR_INVALID_PARAMETER = 87)
+                    bookmark_handle = None
                     flags = _EvtSubscribeStartAtOldestRecord
             else:
-                bookmark_handle = win32evtlog.EvtCreateBookmark(None)
+                # API Windows : Bookmark doit etre None quand flags=StartAtOldestRecord
+                # (sinon EvtSubscribe -> ERROR_INVALID_PARAMETER = 87)
+                bookmark_handle = None
                 flags = _EvtSubscribeStartAtOldestRecord
 
             # Signal Windows pour réveiller le thread quand un event arrive
