@@ -1,52 +1,3 @@
-**Interactive (wizard) :**
-        Double-click the .msi file -> follow the wizard     ← INDENT CASSÉ
-            **Silent (for MDM/GPO/Intune) :**
-````powershell                                                ← BACKTICKS ÉCHAPPENT du YAML
-            msiexec /i ...
-```                                                          ← idem
-            Visible in Control Panel...
-```
-
-**Le problème** : nano a interprété les **triple-backticks ` ``` `** comme du Markdown et a cassé l'indentation YAML pendant le paste. C'est un bug classique avec les heredocs multi-lignes contenant des caractères spéciaux.
-
-Le fichier fait **423 lignes** (vs ~370 attendues), donc il y a du contenu dupliqué/cassé.
-
----
-
-## 🔧 Fix — Section release notes simplifiée (sans triple-backticks)
-
-Le plus simple est de **remplacer la section `body:` problématique** par une version sans triple-backticks (qui restera lisible).
-
-### ⚙️ Solution — Recoller le fichier avec une version "sans backticks"
-
-Je vais te livrer **le fichier complet corrigé** avec :
-- ✅ Triple-backticks remplacés par indentation simple (4 espaces) — markdown valide aussi
-- ✅ Aucun caractère spécial qui peut tromper nano/YAML parser
-
----
-
-## ⚙️ Action — Vider + recoller
-
-### 1. Vider complètement :
-
-```bash
-> ~/cybersafe-agent/.github/workflows/build-windows.yml
-wc -l ~/cybersafe-agent/.github/workflows/build-windows.yml
-```
-
-→ Doit retourner `0`.
-
-### 2. Ouvrir nano :
-
-```bash
-nano ~/cybersafe-agent/.github/workflows/build-windows.yml
-```
-
-### 3. Coller ce contenu (entre les `═══`, sans les `═══` ni les ` ``` ` Markdown autour) :
-
-═══════════════════════════════════════════════════════════════════════
-
-```yaml
 # .github/workflows/build-windows.yml
 #
 # Cybersafe-AI Agent — Windows build workflow (SOC-200 Phase 2 + SOC-204)
@@ -336,59 +287,18 @@ jobs:
           body: |
             Cybersafe Agent Windows build.
 
-            Two distribution options below :
+            Two distribution options:
 
-            1) MSI installer (recommended for sysadmins) :
-               Download the .msi file, then either double-click it
-               for the wizard, or run silently with :
+            1) MSI installer (recommended for sysadmins).
+               Download the .msi file, then double-click for the wizard,
+               or run silently with:
                    msiexec /i FILENAME.msi /qn TOKEN=csa_xxx
                Visible in Control Panel > Programs and Features.
 
-            2) Zip + PowerShell installer :
+            2) Zip + PowerShell installer.
                Download the .zip, extract it, open PowerShell as Admin
-               in the extracted folder, then run :
+               in the extracted folder, then run:
                    .\install.ps1
 
             Built from commit ${{ github.sha }}.
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-```
-
-═══════════════════════════════════════════════════════════════════════
-
-### 4. Sauvegarder dans nano : Ctrl+O Enter Ctrl+X
-
----
-
-## ✅ Validation
-
-```bash
-cd ~/cybersafe-agent && python3 -c "
-import yaml
-with open('.github/workflows/build-windows.yml') as f:
-    data = yaml.safe_load(f)
-    print('Syntaxe YAML : OK')
-    jobs = data.get('jobs', {})
-    for job_name, job in jobs.items():
-        steps = job.get('steps', [])
-        print(f'Job {job_name!r} : {len(steps)} steps')
-        for i, step in enumerate(steps, 1):
-            print(f'  {i:2d}. {step.get(\"name\", \"<unnamed>\")}')
-"
-wc -l ~/cybersafe-agent/.github/workflows/build-windows.yml
-```
-
-**Attendu** : 15 steps, ~300 lignes (pas 423).
-
----
-
-## ⚙️ Puis commit + push + tag
-
-```bash
-cd ~/cybersafe-agent && git add .github/workflows/build-windows.yml && \
-git commit -m "fix(ci): SOC-204 — clean YAML release notes (remove triple-backticks)" && \
-git push origin main && \
-git tag v1.1.0-beta.3 -m "SOC-204 — clean YAML" && \
-git push origin v1.1.0-beta.3
-```
-
-🛑 Vas-y et envoie le résultat du build #5 sur GitHub Actions. 🎯
