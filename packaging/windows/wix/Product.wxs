@@ -249,28 +249,6 @@
                         Remove="uninstall"
                         Wait="yes" />
 
-        <!-- ============================================================
-             Surcharge ImagePath du service Windows
-             ============================================================
-             WiX 3.x n'a pas d'attribut Arguments sur ServiceInstall.
-             On surcharge donc la cle de registre ImagePath ecrite par
-             ServiceInstall, en y ajoutant le flag de mode service.
-
-             Sans ce flag, le binaire tourne en mode console et ne
-             signale jamais SERVICE_RUNNING au SCM, ce qui provoque
-             un timeout apres 30 secondes (Event ID 1053 / 7000 / 7009).
-
-             Avec ce flag, le binaire instancie un wrapper pywin32
-             ServiceFramework qui signale RUNNING immediatement.
-
-             Le format ImagePath exige des guillemets autour du path
-             car le dossier d'install contient un espace. -->
-        <RegistryValue Root="HKLM"
-                       Key="SYSTEM\CurrentControlSet\Services\CybersafeAgent"
-                       Name="ImagePath"
-                       Type="expandable"
-                       Value="&quot;[#CybersafeAgentExe]&quot; --service" />
-
       </Component>
     </DirectoryRef>
 
@@ -327,6 +305,29 @@
     <!-- Images du wizard (optionnel) - Phase 6 -->
     <!-- <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" /> -->
     <!-- <WixVariable Id="WixUIDialogBmp" Value="dialog.bmp" /> -->
+
+
+    <!-- ====================================================================
+         CustomActions : surcharge ImagePath du service apres InstallServices
+         ====================================================================
+         Voir docs/adr/ADR-001 et le post-mortem SOC-204 dans
+         INSTALLATION-WINDOWS.md pour le contexte complet. -->
+
+    <CustomAction Id="SetCmdSetImagePath"
+                  Property="SetImagePath"
+                  Value='&quot;[SystemFolder]reg.exe&quot; ADD &quot;HKLM\SYSTEM\CurrentControlSet\Services\CybersafeAgent&quot; /v ImagePath /t REG_EXPAND_SZ /d &quot;\&quot;[#CybersafeAgentExe]\&quot; --service&quot; /f' />
+
+    <CustomAction Id="SetImagePath"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="SetCmdSetImagePath" After="InstallServices">NOT REMOVE</Custom>
+      <Custom Action="SetImagePath" After="SetCmdSetImagePath">NOT REMOVE</Custom>
+    </InstallExecuteSequence>
 
   </Product>
 </Wix>

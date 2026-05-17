@@ -226,6 +226,7 @@ jobs:
               -arch x64 `
               -ext WixUIExtension `
               -ext WixUtilExtension `
+              -ext WixCAExtension `
               -dSourceDir="$sourceDir" `
               -dInternalDir="$internalDir" `
               -out "dist\" `
@@ -240,6 +241,7 @@ jobs:
           & "$wixBin\light.exe" `
               -ext WixUIExtension `
               -ext WixUtilExtension `
+              -ext WixCAExtension `
               -spdb `
               -out "dist\$msiName" `
               "dist\Product.wixobj" `
