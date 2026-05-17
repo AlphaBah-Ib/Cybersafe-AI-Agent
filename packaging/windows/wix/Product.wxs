@@ -227,7 +227,6 @@
              stoppe avant uninstall -->
         <ServiceControl Id="StartCybersafeAgentService"
                         Name="CybersafeAgent"
-                        Start="install"
                         Stop="both"
                         Remove="uninstall"
                         Wait="yes" />
