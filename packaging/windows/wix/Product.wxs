@@ -23,6 +23,11 @@
 
   Variables de preprocesseur attendues (passees via -d... a candle) :
     SourceDir   : chemin vers dist\cybersafe-agent\ (auto-harvest par heat.exe)
+
+  Changelog :
+    v1 (17/05) : initial WiX skeleton
+    v2 (17/05) : fix LGHT0091 - remove ARPNOMODIFY/ARPNOREPAIR duplicates
+                 (already declared by WixUI_InstallDir extension)
 -->
 
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
@@ -61,12 +66,16 @@
 
     <!-- ==================================================================
          Properties : variables MSI
-         ================================================================== -->
+         ==================================================================
+         IMPORTANT (SOC-204 v2 fix) :
+         ARPNOMODIFY et ARPNOREPAIR sont DEJA declarees par l'extension
+         WixUI_InstallDir, donc on ne les redeclare PAS ici (sinon erreur
+         LGHT0091 'Duplicate symbol'). Les valeurs par defaut de l'extension
+         sont equivalentes a ce qu'on aurait mis (1 = pas de repair/modify
+         dans Add/Remove Programs). -->
     <Property Id="ARPCONTACT" Value="support@cybersafe-ai.com" />
     <Property Id="ARPHELPLINK" Value="https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent/issues" />
     <Property Id="ARPURLINFOABOUT" Value="https://cybersafe-ai-e1u6.vercel.app" />
-    <Property Id="ARPNOREPAIR" Value="1" />
-    <Property Id="ARPNOMODIFY" Value="1" />
 
     <!-- Token agent : peut etre fourni via ligne commande
          Ex: msiexec /i ... TOKEN=csa_xxxxxxxxxx
