@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Cybersafe-AI Agent — Windows MSI Installer (WiX Toolset 3.14)
+  ============================================================
+
+  SOC-204 / Phase 2 : vrai installer MSI standard industrie.
+
+  Produit installable via :
+    - Double-click   : wizard graphique
+    - Ligne commande : msiexec /i cybersafe-agent.msi /qn TOKEN=csa_xxx
+    - GPO/Intune     : deployment natif Active Directory
+    - SCCM/MDM       : packaging .intunewin natif
+
+  IMPORTANT :
+    - UpgradeCode est PERMANENT (ne JAMAIS modifier sous peine de casser
+      tous les upgrades futurs v1 -> v2 -> vN)
+    - ProductCode change a chaque version (regenere par CI a partir
+      du tag Git via uuid5 sur la version)
+
+  Build :
+    candle.exe -ext WixUIExtension -ext WixUtilExtension -dSourceDir=path Product.wxs Internal.wxs
+    light.exe  -ext WixUIExtension -ext WixUtilExtension Product.wixobj Internal.wixobj -o cybersafe-agent.msi
+
+  Variables de preprocesseur attendues (passees via -d... a candle) :
+    SourceDir   : chemin vers dist\cybersafe-agent\ (auto-harvest par heat.exe)
+-->
+
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <!-- ====================================================================
+       Product : metadata du produit
+       ==================================================================== -->
+  <Product
+      Id="{7228EFE3-CBD4-4A39-8211-7E59BEA41541}"
+      UpgradeCode="{FB2510A6-550A-4BAA-9B98-27ACAA64889D}"
+      Name="Cybersafe-AI Agent"
+      Language="1033"
+      Version="1.0.0"
+      Manufacturer="Cybersafe-AI">
+
+    <Package
+        InstallerVersion="500"
+        Compressed="yes"
+        InstallScope="perMachine"
+        Description="Cybersafe-AI Agent - Multi-platform security event collector"
+        Comments="Built with WiX Toolset 3.14, see github.com/AlphaBah-Ib/Cybersafe-AI-Agent" />
+
+    <!-- ==================================================================
+         MajorUpgrade : upgrade v1 -> v2 transparent
+         ================================================================== -->
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+        Schedule="afterInstallInitialize"
+        AllowSameVersionUpgrades="no" />
+
+    <!-- ==================================================================
+         Media : un seul fichier CAB embarque dans le MSI
+         ================================================================== -->
+    <Media Id="1" Cabinet="cybersafe-agent.cab" EmbedCab="yes" />
+
+    <!-- ==================================================================
+         Properties : variables MSI
+         ================================================================== -->
+    <Property Id="ARPCONTACT" Value="support@cybersafe-ai.com" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent/issues" />
+    <Property Id="ARPURLINFOABOUT" Value="https://cybersafe-ai-e1u6.vercel.app" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!-- Token agent : peut etre fourni via ligne commande
+         Ex: msiexec /i ... TOKEN=csa_xxxxxxxxxx
+         Sera saisi via UI dialog en mode interactif (Phase 4) -->
+    <Property Id="TOKEN" Value="csa_REMPLACE_PAR_TON_TOKEN_ICI" Secure="yes" />
+
+    <!-- ==================================================================
+         Directory : arborescence d'installation
+         ================================================================== -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+
+      <!-- C:\Program Files\ (Program Files Files on x64) -->
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Cybersafe Agent">
+          <!-- Les binaires sont declares dans ComponentGroup ci-dessous -->
+        </Directory>
+      </Directory>
+
+      <!-- C:\ProgramData\Cybersafe\ -->
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="CYBERSAFE_DATA_ROOT" Name="Cybersafe">
+          <Directory Id="CYBERSAFE_CONFIG_DIR" Name="config" />
+          <Directory Id="CYBERSAFE_LOGS_DIR" Name="logs" />
+          <Directory Id="CYBERSAFE_BOOKMARKS_DIR" Name="bookmarks" />
+          <Directory Id="CYBERSAFE_SPOOL_DIR" Name="spool" />
+        </Directory>
+      </Directory>
+
+    </Directory>
+
+    <!-- ==================================================================
+         Component : creation des dossiers de donnees
+         ==================================================================
+         Les sous-dossiers de ProgramData doivent etre crees explicitement
+         car WiX ne les cree pas automatiquement (contrairement aux dossiers
+         Program Files qui sont crees au moment du copy des fichiers). -->
+
+    <DirectoryRef Id="CYBERSAFE_DATA_ROOT">
+      <Component Id="DataRootFolder" Guid="*">
+        <CreateFolder />
+        <RegistryValue Root="HKLM"
+                       Key="Software\Cybersafe-AI\Agent"
+                       Name="DataRoot"
+                       Type="string"
+                       Value="[CYBERSAFE_DATA_ROOT]"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="CYBERSAFE_CONFIG_DIR">
+      <Component Id="ConfigFolder" Guid="*">
+        <CreateFolder />
+        <RegistryValue Root="HKLM"
+                       Key="Software\Cybersafe-AI\Agent"
+                       Name="ConfigDir"
+                       Type="string"
+                       Value="[CYBERSAFE_CONFIG_DIR]"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="CYBERSAFE_LOGS_DIR">
+      <Component Id="LogsFolder" Guid="*">
+        <CreateFolder />
+        <RegistryValue Root="HKLM"
+                       Key="Software\Cybersafe-AI\Agent"
+                       Name="LogsDir"
+                       Type="string"
+                       Value="[CYBERSAFE_LOGS_DIR]"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="CYBERSAFE_BOOKMARKS_DIR">
+      <Component Id="BookmarksFolder" Guid="*">
+        <CreateFolder />
+        <RegistryValue Root="HKLM"
+                       Key="Software\Cybersafe-AI\Agent"
+                       Name="BookmarksDir"
+                       Type="string"
+                       Value="[CYBERSAFE_BOOKMARKS_DIR]"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="CYBERSAFE_SPOOL_DIR">
+      <Component Id="SpoolFolder" Guid="*">
+        <CreateFolder />
+        <RegistryValue Root="HKLM"
+                       Key="Software\Cybersafe-AI\Agent"
+                       Name="SpoolDir"
+                       Type="string"
+                       Value="[CYBERSAFE_SPOOL_DIR]"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- ==================================================================
+         Component principal : executable + service Windows
+         ==================================================================
+         IMPORTANT : le contenu de dist\cybersafe-agent\_internal\ sera
+         reference via un ComponentGroup auto-genere par heat.exe (voir
+         ComponentGroupRef "InternalFiles" dans la Feature ci-dessous).
+         Pour l'instant on declare manuellement l'executable principal. -->
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="*">
+
+        <!-- Le binaire principal (PyInstaller onedir mode) -->
+        <File Id="CybersafeAgentExe"
+              Name="cybersafe-agent.exe"
+              Source="$(var.SourceDir)\cybersafe-agent.exe"
+              KeyPath="yes" />
+
+        <!-- ============================================================
+             ServiceInstall : enregistre le service Windows natif
+             ============================================================
+             Equivalent NSSM mais natif Windows Installer.
+             Pourquoi LocalSystem ? Le channel Security du Windows Event
+             Log necessite SeSecurityPrivilege, accorde par defaut a
+             LocalSystem uniquement. -->
+        <ServiceInstall Id="CybersafeAgentService"
+                        Name="CybersafeAgent"
+                        DisplayName="Cybersafe-AI Agent"
+                        Description="Cybersafe-AI Agent - Collects Windows Event Log security events and forwards them to the Cybersafe-AI SOC platform."
+                        Type="ownProcess"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal"
+                        Vital="yes">
+
+          <!-- Recovery policy : redemarre apres crash (US SOC-204)
+               1ere tentative : delay 5 sec
+               2eme tentative : delay 10 sec
+               3eme tentative : delay 30 sec
+               Reset le compteur apres 1 jour sans crash -->
+          <util:ServiceConfig
+              FirstFailureActionType="restart"
+              SecondFailureActionType="restart"
+              ThirdFailureActionType="restart"
+              ResetPeriodInDays="1"
+              RestartServiceDelayInSeconds="5" />
+        </ServiceInstall>
+
+        <!-- ServiceControl : demarre le service apres install,
+             stoppe avant uninstall -->
+        <ServiceControl Id="StartCybersafeAgentService"
+                        Name="CybersafeAgent"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+
+      </Component>
+    </DirectoryRef>
+
+    <!-- ==================================================================
+         Feature : groupement logique des composants
+         ==================================================================
+         Une seule feature "Complete" (pas d'install partielle). -->
+    <Feature Id="CompleteFeature"
+             Title="Cybersafe-AI Agent"
+             Description="Installs the Cybersafe-AI Agent as a Windows service."
+             Level="1"
+             Display="expand"
+             ConfigurableDirectory="INSTALLFOLDER">
+
+      <!-- Dossiers de donnees -->
+      <ComponentRef Id="DataRootFolder" />
+      <ComponentRef Id="ConfigFolder" />
+      <ComponentRef Id="LogsFolder" />
+      <ComponentRef Id="BookmarksFolder" />
+      <ComponentRef Id="SpoolFolder" />
+
+      <!-- Binaire principal + service Windows -->
+      <ComponentRef Id="MainExecutable" />
+
+      <!-- ComponentGroup auto-genere par heat.exe (Phase 2)
+           contient tous les fichiers de dist\cybersafe-agent\_internal\
+           (300+ DLLs Python, pywin32, certifi, urllib3, etc.)
+           Genere a la volee dans le CI via :
+             heat.exe dir dist\cybersafe-agent\_internal\ \
+               -cg InternalFiles \
+               -dr INSTALLFOLDER \
+               -srd -sreg -gg -ke \
+               -out wix\InternalFiles.wxs -->
+      <ComponentGroupRef Id="InternalFiles" />
+
+    </Feature>
+
+    <!-- ==================================================================
+         UI : Wizard graphique standard
+         ==================================================================
+         WixUI_InstallDir = wizard avec selection du dossier d'install.
+         Custom dialog pour le token sera ajoute en Phase 4. -->
+    <UIRef Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- License agreement (EULA) - Phase 6 -->
+    <!-- <WixVariable Id="WixUILicenseRtf" Value="eula.rtf" /> -->
+
+    <!-- Images du wizard (optionnel) - Phase 6 -->
+    <!-- <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" /> -->
+    <!-- <WixVariable Id="WixUIDialogBmp" Value="dialog.bmp" /> -->
+
+  </Product>
+</Wix>
