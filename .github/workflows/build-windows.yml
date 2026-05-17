@@ -189,7 +189,7 @@ jobs:
           Write-Host "Harvesting dist\cybersafe-agent\_internal\ ..."
           & "$wixBin\heat.exe" dir "dist\cybersafe-agent\_internal" `
               -cg InternalFiles `
-              -dr INSTALLFOLDER `
+              -dr INTERNALFOLDER `
               -srd `
               -sreg `
               -sfrag `

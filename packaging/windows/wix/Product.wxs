@@ -28,6 +28,12 @@
     v1 (17/05) : initial WiX skeleton
     v2 (17/05) : fix LGHT0091 - remove ARPNOMODIFY/ARPNOREPAIR duplicates
                  (already declared by WixUI_InstallDir extension)
+    v3 (17/05) : fix ICE03 cabinet name (csa.cab, strict 8.3)
+    v4 (17/05) : fix erreur 1053 - remove ServiceControl Start="install"
+                 (config.yaml not present at install time)
+    v5 (17/05) : fix Failed to load Python DLL python311.dll
+                 -> Add INTERNALFOLDER sub-directory so PyInstaller can
+                    find python311.dll in _internal\ (onedir mode)
 -->
 
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
@@ -61,8 +67,8 @@
 
     <!-- ==================================================================
          Media : un seul fichier CAB embarque dans le MSI
-         ================================================================== -->
-    <!-- Cabinet name : doit respecter format 8.3 (court, sans tiret/espace)
+         ==================================================================
+         Cabinet name : doit respecter format 8.3 (court, sans tiret/espace)
          ou etre en short name pour eviter erreur ICE03 'Bad cabinet syntax'.
          'csa' = abbreviation Cybersafe Agent. -->
     <Media Id="1" Cabinet="csa.cab" EmbedCab="yes" />
@@ -93,7 +99,17 @@
       <!-- C:\Program Files\ (Program Files Files on x64) -->
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLFOLDER" Name="Cybersafe Agent">
-          <!-- Les binaires sont declares dans ComponentGroup ci-dessous -->
+          <!-- Sub-directory for PyInstaller onedir _internal/ files
+               (300+ Python DLLs, certifi, urllib3, pywin32, etc.)
+               
+               IMPORTANT (SOC-204 v5 fix) :
+               PyInstaller cherche python311.dll dans ce sous-dossier
+               specifique. Sans ce sous-dossier, l'exe ne demarre pas
+               avec erreur "Failed to load Python DLL python311.dll".
+               
+               Heat.exe genere les composants dans ce sous-dossier via
+               le parametre -dr INTERNALFOLDER (au lieu de INSTALLFOLDER). -->
+          <Directory Id="INTERNALFOLDER" Name="_internal" />
         </Directory>
       </Directory>
 
@@ -223,8 +239,10 @@
               RestartServiceDelayInSeconds="5" />
         </ServiceInstall>
 
-        <!-- ServiceControl : demarre le service apres install,
-             stoppe avant uninstall -->
+        <!-- ServiceControl : ne pas demarrer pendant l'install
+             (config.yaml absent au moment de l'install, agent crash).
+             Le service est configure en auto-start (ServiceInstall Start="auto")
+             donc il demarrera au prochain reboot apres configuration. -->
         <ServiceControl Id="StartCybersafeAgentService"
                         Name="CybersafeAgent"
                         Stop="both"
@@ -258,12 +276,17 @@
       <!-- ComponentGroup auto-genere par heat.exe (Phase 2)
            contient tous les fichiers de dist\cybersafe-agent\_internal\
            (300+ DLLs Python, pywin32, certifi, urllib3, etc.)
+           
            Genere a la volee dans le CI via :
              heat.exe dir dist\cybersafe-agent\_internal\ \
                -cg InternalFiles \
-               -dr INSTALLFOLDER \
+               -dr INTERNALFOLDER \      IMPORTANT: pas INSTALLFOLDER !
                -srd -sreg -gg -ke \
-               -out wix\InternalFiles.wxs -->
+               -out wix\InternalFiles.wxs
+
+           Le -dr INTERNALFOLDER (au lieu de INSTALLFOLDER) garantit que
+           tous les fichiers sont places dans le sous-dossier _internal\
+           comme PyInstaller le requiert (sinon python311.dll non trouvee). -->
       <ComponentGroupRef Id="InternalFiles" />
 
     </Feature>
