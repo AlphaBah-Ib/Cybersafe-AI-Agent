@@ -14,9 +14,15 @@
 # Build environment:
 #   - windows-latest (Windows Server 2022)
 #   - Python 3.11 (LTS, compatible with PyInstaller 6.x)
-#   - WiX Toolset 3.14 (latest stable 3.x branch)
+#   - WiX Toolset 3.14 (pre-installed on windows-latest by default,
+#     fallback to Chocolatey install if missing)
 #
 # See docs/adr/ADR-001-windows-agent-stack.md for architectural rationale.
+#
+# Changelog:
+#   v1 (16/05): initial build .exe only
+#   v2 (17/05): added MSI build via WiX (failed - choco conflict)
+#   v3 (17/05): resilient WiX detection (handles pre-installed scenario)
 
 name: Build Windows Agent
 
@@ -164,46 +170,95 @@ jobs:
           "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       # =====================================================================
-      # Step 10: NEW - Install WiX Toolset 3.14 (SOC-204)
+      # Step 10: Detect or install WiX Toolset 3.14 (SOC-204)
       # =====================================================================
-      - name: Install WiX Toolset 3.14
+      # windows-latest comes with WiX pre-installed in most cases.
+      # We detect it first; if absent, we install via Chocolatey.
+      # Exports WIX_BIN env var for next steps.
+      - name: Detect or install WiX Toolset 3.14
         shell: pwsh
         run: |
-          Write-Host "Installing WiX Toolset 3.14 via Chocolatey..."
-          choco install wixtoolset --version=3.14.0 --no-progress --yes
-          Write-Host "WiX Toolset installed successfully"
-          # Verify WiX binaries are in PATH
-          $wixPath = "${env:WIX}bin"
-          Write-Host "WiX path: $wixPath"
-          if (Test-Path "$wixPath\heat.exe") {
-              Write-Host "  heat.exe   : OK"
-          } else {
-              Write-Error "heat.exe not found"
-              exit 1
+          $wixPath = $null
+
+          # Strategy 1: check $env:WIX (set by WiX installer)
+          if ($env:WIX -and (Test-Path "${env:WIX}bin\candle.exe")) {
+              $wixPath = "${env:WIX}bin"
+              Write-Host "WiX detected via WIX env var: $wixPath"
           }
-          if (Test-Path "$wixPath\candle.exe") {
-              Write-Host "  candle.exe : OK"
-          } else {
-              Write-Error "candle.exe not found"
-              exit 1
+
+          # Strategy 2: scan common install locations
+          if (-not $wixPath) {
+              $candidates = @(
+                  "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+                  "C:\Program Files\WiX Toolset v3.14\bin",
+                  "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+              )
+              foreach ($c in $candidates) {
+                  if (Test-Path "$c\candle.exe") {
+                      $wixPath = $c
+                      Write-Host "WiX detected at: $wixPath"
+                      break
+                  }
+              }
           }
-          if (Test-Path "$wixPath\light.exe") {
-              Write-Host "  light.exe  : OK"
-          } else {
-              Write-Error "light.exe not found"
+
+          # Strategy 3: install via Chocolatey if still not found
+          if (-not $wixPath) {
+              Write-Host "WiX not found, installing via Chocolatey..."
+              choco install wixtoolset --version=3.14.0 --no-progress --yes --force --ignore-detected-reboot
+              # Re-scan after install
+              $candidates = @(
+                  "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+                  "C:\Program Files\WiX Toolset v3.14\bin"
+              )
+              foreach ($c in $candidates) {
+                  if (Test-Path "$c\candle.exe") {
+                      $wixPath = $c
+                      Write-Host "WiX installed at: $wixPath"
+                      break
+                  }
+              }
+          }
+
+          if (-not $wixPath) {
+              Write-Error "WiX Toolset could not be detected or installed"
               exit 1
           }
 
+          # Verify all 3 binaries we need
+          $binaries = @("heat.exe", "candle.exe", "light.exe")
+          $allFound = $true
+          foreach ($bin in $binaries) {
+              if (Test-Path "$wixPath\$bin") {
+                  Write-Host "  $bin : OK"
+              } else {
+                  Write-Host "  $bin : MISSING"
+                  $allFound = $false
+              }
+          }
+
+          if (-not $allFound) {
+              Write-Error "WiX Toolset binaries are not all available at $wixPath"
+              exit 1
+          }
+
+          # Export WIX_BIN for next steps via GITHUB_ENV
+          "WIX_BIN=$wixPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host ""
+          Write-Host "Exported WIX_BIN=$wixPath for next steps"
+
       # =====================================================================
-      # Step 11: NEW - Auto-harvest _internal/ via heat.exe (SOC-204)
+      # Step 11: Auto-harvest _internal/ via heat.exe (SOC-204)
       # =====================================================================
       - name: Auto-harvest internal files (heat.exe)
         shell: pwsh
         run: |
-          $wixBin = "${env:WIX}bin"
+          $wixBin = "${env:WIX_BIN}"
           $outFile = "packaging\windows\wix\InternalFiles.wxs"
 
+          Write-Host "Using WiX from: $wixBin"
           Write-Host "Harvesting dist\cybersafe-agent\_internal\ ..."
+
           & "$wixBin\heat.exe" dir "dist\cybersafe-agent\_internal" `
               -cg InternalFiles `
               -dr INSTALLFOLDER `
@@ -215,33 +270,36 @@ jobs:
               -var "var.InternalDir" `
               -out $outFile
 
-          if (-not (Test-Path $outFile)) {
-              Write-Error "heat.exe failed to generate $outFile"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "heat.exe failed with exit code $LASTEXITCODE"
               exit 1
           }
 
-          # heat genere les chemins avec INSTALLFOLDER\_internal\... mais
-          # nous voulons que le dossier _internal\ soit cree dans INSTALLFOLDER.
-          # heat gere ca automatiquement avec -dr INSTALLFOLDER -srd.
+          if (-not (Test-Path $outFile)) {
+              Write-Error "heat.exe did not produce $outFile"
+              exit 1
+          }
 
           $lineCount = (Get-Content $outFile).Count
           Write-Host "Generated $outFile ($lineCount lines)"
+          Write-Host ""
           Write-Host "First 20 lines:"
           Get-Content $outFile -TotalCount 20
 
       # =====================================================================
-      # Step 12: NEW - Compile MSI (candle.exe + light.exe) (SOC-204)
+      # Step 12: Compile MSI (candle.exe + light.exe) (SOC-204)
       # =====================================================================
       - name: Compile MSI (candle + light)
         id: msi
         shell: pwsh
         run: |
-          $wixBin = "${env:WIX}bin"
+          $wixBin = "${env:WIX_BIN}"
           $version = "${{ steps.version.outputs.version }}"
           $msiName = "cybersafe-agent-windows-v$version.msi"
           $sourceDir = (Resolve-Path "dist\cybersafe-agent").Path
           $internalDir = (Resolve-Path "dist\cybersafe-agent\_internal").Path
 
+          Write-Host "Using WiX from: $wixBin"
           Write-Host "Source directory : $sourceDir"
           Write-Host "Internal directory: $internalDir"
 
@@ -303,7 +361,7 @@ jobs:
           compression-level: 0
 
       # =====================================================================
-      # Step 14: NEW - Upload .msi artifact (SOC-204)
+      # Step 14: Upload .msi artifact (SOC-204)
       # =====================================================================
       - name: Upload .msi artifact
         uses: actions/upload-artifact@v4
@@ -339,3 +397,27 @@ jobs:
             Download `${{ steps.msi.outputs.msi_name }}` below, then :
 
             **Interactive (wizard) :**
+        Double-click the .msi file -> follow the wizard
+
+            **Silent (for MDM/GPO/Intune) :**
+```powershell
+            msiexec /i cybersafe-agent-windows-vX.Y.Z.msi /qn TOKEN=csa_xxxxxxxxxxxxx
+```
+
+            Visible in Control Panel -> Programs and Features for easy uninstall.
+
+            ### Option 2 : Zip + PowerShell installer
+
+            Download `${{ steps.zip.outputs.zip_name }}` below, extract it, then :
+
+```powershell
+            cd cybersafe-agent
+            .\install.ps1
+```
+
+            See `README-Windows.md` inside the zip for detailed instructions.
+
+            ## Verification
+
+            Built from commit `${{ github.sha }}` on `${{ github.run_started_at }}`.
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
