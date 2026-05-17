@@ -19,19 +19,20 @@ Format JSON attendu en entrée :
         "event_data": {
             "TargetUserName": "admin",
             "IpAddress": "192.168.1.100",
-            "LogonType": "3"
+            "LogonType": "3",
+            "Status": "0xC000006D",
+            "SubStatus": "0xC0000064"
         },
         "message": "An account failed to log on..."
     }
 
 Mapping EventID -> (severity, event_type) aligne MITRE ATT&CK.
-Le mapping est base sur :
-  - Recommandations Microsoft Security Baselines
-  - CIS Microsoft Windows Benchmarks
-  - MITRE ATT&CK Tactics (TA0001-TA0009)
 
-SOC-202 fix (17 mai 2026) : ajout fallback Level Windows natif pour
-garantir qu'aucun EventID inconnu ne soit perdu (cf. critere acceptance US).
+Historique :
+  - SOC-200 (16/05): mapping initial 33 EventIDs MITRE
+  - SOC-202 fix (17/05): ajout fallback Level natif Windows
+  - SOC-203 fix (17/05): ajout EventID 7045 + extraction failure_reason
+                         + extraction image_path + decoder NTSTATUS case-insensitive
 """
 
 import json
@@ -46,8 +47,6 @@ logger = logging.getLogger("cybersafe.parser.windows")
 # =============================================================================
 # Mapping EventID -> (severity, event_type)
 # =============================================================================
-# Aligne MITRE ATT&CK. Voir ADR-001 pour la justification de chaque EventID.
-# Severite : info < low < medium < high < critical
 
 WINDOWS_EVENT_MAPPING = {
     # -- Authentication (Security channel) -----------------------------
@@ -60,82 +59,98 @@ WINDOWS_EVENT_MAPPING = {
     4673: ("medium",   "windows_sensitive_priv"),      # TA0004 sensitive privilege use
 
     # -- Process & Service (Security channel) --------------------------
-    4688: ("medium",   "windows_process_create"),      # TA0002 Execution (CRITICAL VISIBILITY)
-    4697: ("high",     "windows_service_install"),     # TA0003 Persistence (service)
+    4688: ("medium",   "windows_process_create"),      # TA0002 Execution
+    4697: ("high",     "windows_service_install"),     # TA0003 Persistence (service via Sec audit)
+
+    # -- Service Control Manager (System channel) ----------------------
+    # SOC-203 fix : ajout pour couvrir l'US originale
+    7045: ("high",     "windows_service_installed_scm"),  # TA0003 Persistence (service via SCM)
 
     # -- Object access (Security channel) ------------------------------
     4663: ("medium",   "windows_object_access"),       # TA0009 Collection (file/reg access)
 
     # -- Audit policy (Security channel) - TRES CRITIQUE ---------------
     4719: ("critical", "windows_audit_policy_changed"),  # TA0005 Defense Evasion
-    1102: ("critical", "windows_audit_log_cleared"),     # TA0005 (attaquant efface ses traces)
+    1102: ("critical", "windows_audit_log_cleared"),     # TA0005
 
     # -- Account management (Security channel) -------------------------
     4720: ("high",     "windows_user_created"),        # TA0003 Persistence
-    4722: ("medium",   "windows_user_enabled"),        # account enabled
-    4724: ("high",     "windows_password_reset"),      # TA0006 password reset attempt
-    4725: ("medium",   "windows_user_disabled"),       # account disabled
-    4728: ("high",     "windows_user_added_to_group"), # TA0004 added to security group
-    4732: ("high",     "windows_user_added_to_local"), # TA0004 added to local group
-    4738: ("medium",   "windows_user_changed"),        # user account modified
+    4722: ("medium",   "windows_user_enabled"),
+    4724: ("high",     "windows_password_reset"),      # TA0006
+    4725: ("medium",   "windows_user_disabled"),
+    4728: ("high",     "windows_user_added_to_group"), # TA0004
+    4732: ("high",     "windows_user_added_to_local"), # TA0004
+    4738: ("medium",   "windows_user_changed"),
 
-    # -- Kerberos (Security channel, AD environments) ------------------
-    4768: ("medium",   "windows_kerberos_tgt"),        # TA0006 TGT requested
-    4769: ("medium",   "windows_kerberos_service"),    # TA0006 service ticket requested
+    # -- Kerberos (Security channel, AD) -------------------------------
+    4768: ("medium",   "windows_kerberos_tgt"),
+    4769: ("medium",   "windows_kerberos_service"),
 
     # -- PowerShell (Microsoft-Windows-PowerShell/Operational) ---------
-    4103: ("medium",   "windows_powershell_module"),   # module logging
-    4104: ("high",     "windows_powershell_script"),   # TA0002 script block (modern attacks)
+    4103: ("medium",   "windows_powershell_module"),
+    4104: ("high",     "windows_powershell_script"),   # TA0002
 
-    # -- Windows Defender (Microsoft-Windows-Windows Defender/Operational)
-    1006: ("critical", "windows_malware_detected"),    # malware detected
-    1007: ("critical", "windows_malware_action"),      # malware action taken
-    1015: ("high",     "windows_defender_event"),      # suspicious activity
+    # -- Windows Defender ---------------------------------------------
+    1006: ("critical", "windows_malware_detected"),
+    1007: ("critical", "windows_malware_action"),
+    1015: ("high",     "windows_defender_event"),
 
-    # -- Task Scheduler (Microsoft-Windows-TaskScheduler/Operational) --
-    106:  ("medium",   "windows_task_registered"),     # TA0003 new task (persistence)
-    140:  ("medium",   "windows_task_updated"),        # task updated
-    141:  ("info",     "windows_task_deleted"),        # task deleted
+    # -- Task Scheduler -----------------------------------------------
+    106:  ("medium",   "windows_task_registered"),     # TA0003
+    140:  ("medium",   "windows_task_updated"),
+    141:  ("info",     "windows_task_deleted"),
 
-    # -- RDP / Terminal Services ---------------------------------------
-    21:   ("medium",   "windows_rdp_session_start"),   # session reconnected
-    23:   ("info",     "windows_rdp_session_end"),     # logoff
-    24:   ("info",     "windows_rdp_session_disco"),   # disconnected
-    25:   ("medium",   "windows_rdp_reconnect"),       # reconnect (suspicious if unusual hours)
+    # -- RDP / Terminal Services --------------------------------------
+    21:   ("medium",   "windows_rdp_session_start"),
+    23:   ("info",     "windows_rdp_session_end"),
+    24:   ("info",     "windows_rdp_session_disco"),
+    25:   ("medium",   "windows_rdp_reconnect"),
 }
 
 
 # =============================================================================
 # Mapping Windows Level natif -> severity Cybersafe (SOC-202 fix)
 # =============================================================================
-# Fallback pour les EventIDs non mappes dans WINDOWS_EVENT_MAPPING.
-# Source : https://learn.microsoft.com/en-us/windows/win32/wes/eventmanifestschema-leveltype-complextype
-#
-# Pourquoi un fallback ?
-#   - WINDOWS_EVENT_MAPPING couvre 33 EventIDs critiques (MITRE ATT&CK)
-#   - Mais Windows genere des milliers d'EventIDs differents
-#   - Sans fallback, tous les EventIDs non-listes seraient classes "info"
-#     -> perte d'information pour les events Error/Critical inconnus
-#   - Avec fallback, le Level natif Windows donne une severity coherente
-#     meme pour les EventIDs non mappes explicitement.
-#
-# Priorite : MITRE mapping > Level natif Windows > "info" par defaut
 
 WINDOWS_LEVEL_TO_SEVERITY = {
-    "Critical":    "critical",   # Level 1
-    "Error":       "high",       # Level 2
-    "Warning":     "medium",     # Level 3
-    "Information": "info",       # Level 4
-    "Verbose":     "info",       # Level 5
+    "Critical":    "critical",
+    "Error":       "high",
+    "Warning":     "medium",
+    "Information": "info",
+    "Verbose":     "info",
+}
+
+
+# =============================================================================
+# Codes d'echec d'authentification NTSTATUS (SOC-203 fix)
+# =============================================================================
+# Source : Microsoft NTSTATUS documentation + EventID 4625 SubStatus mapping
+# Utilise pour decoder le champ `failure_reason` lors d'echecs de logon.
+#
+# IMPORTANT : les cles sont normalisees en format "0xXXXXXXXX" (0x lowercase,
+# hex digits uppercase) pour matching case-insensitive via _normalize_ntstatus().
+
+NTSTATUS_LOGON_FAILURES = {
+    "0xC0000064": "user_does_not_exist",        # bad username
+    "0xC000006A": "wrong_password",
+    "0xC000006D": "bad_credentials",            # generic credential failure
+    "0xC000006E": "account_restriction",
+    "0xC000006F": "logon_time_restriction",
+    "0xC0000070": "workstation_restriction",
+    "0xC0000071": "password_expired",
+    "0xC0000072": "account_disabled",
+    "0xC000009A": "insufficient_resources",
+    "0xC0000133": "clock_skew",
+    "0xC0000193": "account_expired",
+    "0xC0000224": "password_must_change",
+    "0xC0000234": "account_locked_out",
+    "0xC0000371": "no_logon_servers",
 }
 
 
 # =============================================================================
 # Mapping camelCase Windows -> snake_case Python
 # =============================================================================
-# Windows EventData fields use PascalCase (TargetUserName, IpAddress, ...).
-# On les normalise en snake_case pour coherence avec parsers/linux.py.
-# Les cles non listees ici sont passees telles quelles (en snake_case auto).
 
 WINDOWS_FIELD_MAPPING = {
     # User identification
@@ -144,6 +159,7 @@ WINDOWS_FIELD_MAPPING = {
     "TargetUserSid":      "user_sid",
     "SubjectUserSid":     "subject_sid",
     "TargetDomainName":   "domain",
+    "SubjectDomainName":  "subject_domain",
 
     # Network
     "IpAddress":          "ip",
@@ -154,22 +170,32 @@ WINDOWS_FIELD_MAPPING = {
     "LogonType":          "logon_type",
     "LogonProcessName":   "logon_process",
     "AuthenticationPackageName": "auth_package",
+    "Status":             "status_code",
+    "SubStatus":          "sub_status_code",
+    "FailureReason":      "failure_reason_raw",
 
     # Process
     "ProcessName":        "process_name",
     "ProcessId":          "process_id",
-    "CommandLine":        "cmd",
+    "NewProcessName":     "process_name",   # alias for 4688
     "ParentProcessName":  "parent_process",
+    "CommandLine":        "cmd",
 
     # File / Object
     "ObjectName":         "object_name",
     "ObjectType":         "object_type",
     "AccessMask":         "access_mask",
 
-    # Service
+    # Service (SOC-203 fix : 7045 fields)
     "ServiceName":        "service_name",
     "ServiceType":        "service_type",
     "ServiceStartType":   "service_start_type",
+    "ImagePath":          "image_path",
+    "ServiceFileName":    "image_path",     # alias 7045
+
+    # Group membership (4728/4732 fix)
+    "MemberName":         "member",
+    "GroupName":          "group",
 }
 
 
@@ -183,15 +209,61 @@ def _camel_to_snake(name: str) -> str:
     return "".join(result)
 
 
+def _normalize_ntstatus(code: str) -> str:
+    """
+    Normalise un NTSTATUS code en format canonique '0xXXXXXXXX'.
+
+    Garantit que le prefix '0x' est en lowercase et les hex digits en uppercase,
+    pour permettre un matching case-insensitive avec NTSTATUS_LOGON_FAILURES.
+
+    Examples:
+        "0xC0000064"  -> "0xC0000064"
+        "0XC0000064"  -> "0xC0000064"
+        "0xc0000064"  -> "0xC0000064"
+        "C0000064"    -> "C0000064"    (no prefix, just upper)
+        ""            -> ""
+        None          -> ""
+    """
+    if not code or not isinstance(code, str):
+        return ""
+    code = code.strip()
+    if code.lower().startswith("0x"):
+        return "0x" + code[2:].upper()
+    return code.upper()
+
+
+def _decode_logon_failure_reason(status: str, sub_status: str) -> str:
+    """
+    Decode NTSTATUS codes en raison d'echec human-readable.
+
+    Priorite : SubStatus (plus specifique) > Status > "unknown".
+
+    Robust to case variations : "0xC0000064", "0XC0000064", "0xc0000064"
+    sont tous traites de maniere identique grace a _normalize_ntstatus().
+
+    Args:
+        status: NTSTATUS code (ex: "0xC000006D")
+        sub_status: sub-NTSTATUS code (ex: "0xC0000064")
+
+    Returns:
+        String courte (ex: "user_does_not_exist") ou "unknown" si non reconnu.
+    """
+    # SubStatus is more specific (e.g. wrong username vs wrong password)
+    sub_normalized = _normalize_ntstatus(sub_status)
+    if sub_normalized in NTSTATUS_LOGON_FAILURES:
+        return NTSTATUS_LOGON_FAILURES[sub_normalized]
+
+    # Fallback on Status
+    status_normalized = _normalize_ntstatus(status)
+    if status_normalized in NTSTATUS_LOGON_FAILURES:
+        return NTSTATUS_LOGON_FAILURES[status_normalized]
+
+    return "unknown"
+
+
 def _normalize_event_data(event_data: dict) -> dict:
     """
     Normalise les cles EventData Windows (PascalCase) en snake_case Python.
-
-    Utilise WINDOWS_FIELD_MAPPING pour les champs connus (mapping explicite),
-    fallback sur _camel_to_snake() pour les champs inconnus.
-
-    Convertit aussi certaines valeurs en types Python natifs
-    (LogonType en int, etc.) quand c'est pertinent.
     """
     if not isinstance(event_data, dict):
         return {}
@@ -201,23 +273,25 @@ def _normalize_event_data(event_data: dict) -> dict:
         if not key:
             continue
 
-        # 1. Normaliser la cle
         normalized_key = WINDOWS_FIELD_MAPPING.get(key) or _camel_to_snake(key)
 
-        # 2. Nettoyer la valeur (skip vide et "-" Windows)
         if value in (None, "", "-"):
             continue
 
-        # 3. Conversion type pour les champs numeriques connus
+        # Conversion type pour les champs numeriques connus
         if normalized_key in ("port", "logon_type", "process_id"):
             try:
                 value = int(value)
             except (ValueError, TypeError):
-                pass  # garde la string si conversion echoue
+                pass
 
-        # 4. Tronquer les commandes pour eviter abus (similaire parsers/linux.py)
+        # Tronquer les commandes pour eviter abus
         if normalized_key == "cmd" and isinstance(value, str):
             value = value[:200]
+
+        # Tronquer les image paths pour eviter abus (service binaires)
+        if normalized_key == "image_path" and isinstance(value, str):
+            value = value[:500]
 
         parsed[normalized_key] = value
 
@@ -228,56 +302,55 @@ def detect_severity_and_type(event_id: int, channel: str, native_level: str = ""
     """
     Determine (severity, event_type) a partir de l'EventID Windows.
 
-    Strategie en 2 niveaux (priorite decroissante) :
-      1. Mapping MITRE ATT&CK explicite (WINDOWS_EVENT_MAPPING)
-         -> 33 EventIDs critiques avec severity metier (ex: 4625 = high)
-      2. Fallback sur le Level natif Windows (WINDOWS_LEVEL_TO_SEVERITY)
-         -> Critical / Error / Warning / Information / Verbose
-         -> Garantit qu'AUCUN event ne soit perdu, meme s'il n'est pas
-            dans le mapping MITRE.
-
-    Args:
-        event_id: EventID Windows (int)
-        channel: nom du channel (ex: "Security", "System")
-        native_level: Level natif Windows ("Critical", "Error", "Warning",
-                      "Information", "Verbose") - optionnel
-
-    Returns:
-        Tuple (severity, event_type) ou :
-            severity in {"info", "low", "medium", "high", "critical"}
-            event_type est un slug normalise (ex: "windows_logon_failed")
+    Strategie 2 niveaux :
+      1. Mapping MITRE ATT&CK explicite (priorite)
+      2. Fallback sur Level natif Windows
     """
-    # Niveau 1 : mapping MITRE ATT&CK
     mapping = WINDOWS_EVENT_MAPPING.get(event_id)
     if mapping:
         return mapping
 
-    # Niveau 2 : fallback sur Level natif Windows
     fallback_severity = WINDOWS_LEVEL_TO_SEVERITY.get(native_level, "info")
 
-    # Log debug pour amelioration future du mapping (uniquement events non-info)
     if fallback_severity != "info":
         logger.debug(
             f"Unknown Windows EventID {event_id} from channel '{channel}' "
-            f"(native level: {native_level}, fallback severity: {fallback_severity}). "
-            f"Consider adding to WINDOWS_EVENT_MAPPING if relevant for SOC."
+            f"(native level: {native_level}, fallback severity: {fallback_severity})."
         )
 
     return (fallback_severity, "windows_unknown")
+
+
+def _enrich_parsed_per_eventid(event_id: int, parsed: dict) -> dict:
+    """
+    Enrichit le dict parsed avec des champs derives specifiques par EventID.
+
+    SOC-203 fix : extraction de champs metiers critiques pour les regles
+    de detection.
+    """
+    # EventID 4625 : decoder failure_reason depuis Status/SubStatus
+    if event_id == 4625:
+        status = parsed.get("status_code", "")
+        sub_status = parsed.get("sub_status_code", "")
+        parsed["failure_reason"] = _decode_logon_failure_reason(status, sub_status)
+
+    # EventID 4732 / 4728 : extraire le group depuis TargetUserName
+    # (dans ces events, TargetUserName est en fait le nom du groupe)
+    if event_id in (4728, 4732):
+        # Sur 4732/4728, "user" extrait par mapping = en fait le groupe
+        # On renomme pour clarte semantique
+        if "user" in parsed:
+            parsed["group"] = parsed.pop("user")
+        # Le membre ajoute est dans MemberName -> member
+        # subject_user reste = administrateur qui a fait l'ajout
+
+    return parsed
 
 
 def line_to_event(line: str, source_path: str) -> dict:
     """
     Transforme une ligne JSON Windows Event Log en payload event pour
     /api/soc/ingest/.
-
-    Format de sortie identique a parsers.linux.line_to_event() pour
-    coherence backend.
-
-    Robustesse :
-      - JSON malforme -> degradation gracieuse vers ("info", "windows_malformed")
-      - Champ manquant -> valeur par defaut sans crash
-      - EventID inconnu -> fallback sur Level natif Windows (SOC-202 fix)
     """
     # -- 1. Parsing JSON robuste ---------------------------------------
     try:
@@ -296,7 +369,7 @@ def line_to_event(line: str, source_path: str) -> dict:
             "parsed": {},
         }
 
-    # -- 2. Extraction des metadonnees core ----------------------------
+    # -- 2. Extraction metadonnees core --------------------------------
     channel = data.get("channel") or "Unknown"
     event_id = data.get("event_id") or 0
     try:
@@ -304,28 +377,31 @@ def line_to_event(line: str, source_path: str) -> dict:
     except (ValueError, TypeError):
         event_id = 0
 
-    # -- 3. Severity & event_type : MITRE mapping + fallback Level natif
+    # -- 3. Severity & event_type --------------------------------------
     native_level = data.get("level", "")
     severity, event_type = detect_severity_and_type(event_id, channel, native_level)
 
-    # -- 4. Timestamp : preserver celui de Windows si possible ---------
+    # -- 4. Timestamp --------------------------------------------------
     ts = data.get("time_created")
     if not ts or not isinstance(ts, str):
         ts = datetime.now(timezone.utc).isoformat()
 
-    # -- 5. Extraction des champs structures depuis event_data ---------
+    # -- 5. Extraction et normalisation event_data ---------------------
     parsed = _normalize_event_data(data.get("event_data", {}))
 
-    # -- 6. Enrichissement parsed avec metadonnees Windows utiles ------
+    # -- 6. Enrichissement specifique par EventID (SOC-203 fix) --------
+    parsed = _enrich_parsed_per_eventid(event_id, parsed)
+
+    # -- 7. Metadonnees Windows ----------------------------------------
     parsed["event_id"] = event_id
     if computer := data.get("computer"):
         parsed["computer"] = computer
     if provider := data.get("provider"):
         parsed["provider"] = provider
 
-    # -- 7. Construction de l'event final ------------------------------
+    # -- 8. Event final ------------------------------------------------
     return {
-        "source": channel,  # ex: "Security", "System", ...
+        "source": channel,
         "raw": line.strip()[:5000],
         "event_type": event_type,
         "severity": severity,
