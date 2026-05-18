@@ -428,14 +428,13 @@ class WindowsLogTailer:
                         f"  bookmark for '{channel}' invalid ({exc}); "
                         f"starting from current position"
                     )
-                    bookmark_handle = win32evtlog.EvtCreateBookmark(
-                        "<BookmarkList></BookmarkList>"
-                    )
+                    # Bookmark MUST be None when using ToFutureEvents
+                    # (Microsoft EvtSubscribe API contract: Bookmark only with StartAfterBookmark)
+                    bookmark_handle = None
                     flags = _EvtSubscribeToFutureEvents
             else:
-                bookmark_handle = win32evtlog.EvtCreateBookmark(
-                    "<BookmarkList></BookmarkList>"
-                )
+                # Bookmark MUST be None when using ToFutureEvents
+                bookmark_handle = None
                 flags = _EvtSubscribeToFutureEvents
                 logger.info(
                     f"  starting '{channel}' from current position (no bookmark)"
@@ -516,6 +515,12 @@ class WindowsLogTailer:
                     )
                     event_dict = _parse_event_xml(xml_str)
                     json_line = json.dumps(event_dict, separators=(",", ":"))
+                    # Bookmark may be None on cold start (ToFutureEvents)
+                    # Create it lazily on first event so we can persist progress
+                    if bookmark_handle is None:
+                        bookmark_handle = win32evtlog.EvtCreateBookmark(
+                            "<BookmarkList></BookmarkList>"
+                        )
                     win32evtlog.EvtUpdateBookmark(bookmark_handle, event_handle)
                     try:
                         self.callback(json_line, channel)
@@ -530,7 +535,7 @@ class WindowsLogTailer:
                     )
 
             # Persistance bookmark periodique
-            if events_since_last_save >= BOOKMARK_SAVE_INTERVAL:
+            if events_since_last_save >= BOOKMARK_SAVE_INTERVAL and bookmark_handle is not None:
                 self._persist_bookmark(bookmark_handle, channel)
                 events_since_last_save = 0
 
@@ -540,8 +545,11 @@ class WindowsLogTailer:
 
         # === Sauvegarde finale du bookmark au stop ===
         try:
-            self._persist_bookmark(bookmark_handle, channel)
-            logger.info(f"  bookmark saved on stop for '{channel}'")
+            if bookmark_handle is not None:
+                self._persist_bookmark(bookmark_handle, channel)
+                logger.info(f"  bookmark saved on stop for '{channel}'")
+            else:
+                logger.info(f"  no events received on '{channel}', skip bookmark save")
         except Exception as exc:
             logger.warning(
                 f"  could not save final bookmark for '{channel}': {exc}"
