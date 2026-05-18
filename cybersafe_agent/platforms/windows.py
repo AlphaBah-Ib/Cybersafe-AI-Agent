@@ -440,12 +440,15 @@ class WindowsLogTailer:
                     f"  starting '{channel}' from current position (no bookmark)"
                 )
 
-            # Subscription en mode PULL : SignalEvent=None
-            # EvtNext sera appele en boucle, pas de wait handle
+            # Microsoft EvtSubscribe API : SignalEvent OR Callback must be non-NULL.
+            # En mode pull on cree un SignalEvent handle mais on n'attend jamais
+            # dessus - on poll EvtNext directement avec sleep entre les calls.
+            # Reference : pywin32 issue #2377 confirmed pattern.
+            signal_event = win32event.CreateEvent(None, False, False, None)
             subscription = win32evtlog.EvtSubscribe(
                 channel,
                 flags,
-                SignalEvent=None,
+                SignalEvent=signal_event,
                 Query=xpath_query,
                 Bookmark=bookmark_handle,
             )
