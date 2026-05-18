@@ -100,7 +100,8 @@ _EvtSubscribeStartAfterBookmark = 3
 
 # Timeout en ms pour attendre un event lors du polling de la subscription.
 # 1000 ms = check toutes les 1s si on doit s'arrêter (stop_event).
-_SUBSCRIPTION_WAIT_TIMEOUT_MS = 1000
+_SUBSCRIPTION_WAIT_TIMEOUT_MS = 1000  # kept for backward compat, unused since pull refactor
+_POLL_INTERVAL_SECONDS = 2.0  # polling interval for EvtNext (pull mode)
 
 
 # =============================================================================
@@ -391,161 +392,161 @@ class WindowsLogTailer:
         for t in self._threads:
             t.join(timeout=3.0)
 
-    def _subscribe_loop(self, channel: str):
+    def _subscribe_loop(self, channel: str) -> None:
         """
-        Boucle de subscription pour un channel (1 thread par channel).
+        Boucle de reception d'events Windows en mode PULL (polling EvtNext).
 
-        Stratégie :
-          1. Build XPath query (filtre EventID si Security)
-          2. Charger bookmark depuis disque si existe (sinon start oldest)
-          3. EvtSubscribe avec wait handle (push-based)
-          4. Pour chaque event reçu : XML -> dict -> JSON -> callback
-          5. Update bookmark (mémoire + disque toutes les N events)
-          6. Au stop : sauvegarder bookmark final
+        Refacto v1.1.0-beta.14 : remplacement du push-based (EvtSubscribe +
+        WaitForSingleObject + signal_event) qui se montrait non fiable selon
+        les versions Windows (signal_event ne se declenche pas sur Win10/Win11
+        avec certains flags). Le mode pull est :
+          - Predictible (depend uniquement de l'API Windows native, stable
+            depuis Vista)
+          - Pattern industrie (Splunk UF, Wazuh, Elastic Beats)
+          - Surcout CPU negligeable (8 channels x poll 2s = 4 calls/s)
 
-        Resilience :
+        Resilience identique :
           - Channel inexistant -> warning + abandon ce channel
-          - Accès refusé -> error + abandon ce channel
-          - Event XML malformé -> warning + skip cet event (continue)
+          - Acces refuse -> error + abandon ce channel
+          - Event XML malforme -> warning + skip cet event
+          - 5 EvtNext errors consecutives -> abandon thread (anti-boucle infinie)
         """
         try:
             xpath_query = _build_xpath_query(channel, self.security_event_ids)
             existing_bookmark = _load_bookmark(self.bookmarks_dir, channel)
 
-            # Créer le bookmark : soit depuis disque, soit nouveau
+            # Bookmark : reprise depuis disque OU nouveau vide
             if existing_bookmark:
                 try:
                     bookmark_handle = win32evtlog.EvtCreateBookmark(existing_bookmark)
                     flags = _EvtSubscribeStartAfterBookmark
                     logger.info(
-                        f"  ↻ Channel '{channel}': resuming from saved bookmark"
+                        f"  resuming '{channel}' from saved bookmark"
                     )
                 except pywintypes.error as exc:
                     logger.warning(
-                        f"  ⚠ Bookmark for '{channel}' invalid ({exc}); "
-                        f"falling back to oldest record"
+                        f"  bookmark for '{channel}' invalid ({exc}); "
+                        f"starting from current position"
                     )
-                    # API Windows : Bookmark=None + ToFutureEvents = push-based
-                    # signal_event arme immediatement, sans replay historique.
-                    # (StartAtOldestRecord chargerait tout l'historique en arriere
-                    # plan et le signal_event resterait silencieux pendant le replay)
-                    bookmark_handle = None
+                    bookmark_handle = win32evtlog.EvtCreateBookmark(
+                        "<BookmarkList></BookmarkList>"
+                    )
                     flags = _EvtSubscribeToFutureEvents
             else:
-                # API Windows : Bookmark=None + ToFutureEvents = push-based
-                # signal_event arme immediatement, sans replay historique.
-                # (StartAtOldestRecord chargerait tout l'historique en arriere
-                # plan et le signal_event resterait silencieux pendant le replay)
-                bookmark_handle = None
+                bookmark_handle = win32evtlog.EvtCreateBookmark(
+                    "<BookmarkList></BookmarkList>"
+                )
                 flags = _EvtSubscribeToFutureEvents
+                logger.info(
+                    f"  starting '{channel}' from current position (no bookmark)"
+                )
 
-            # Signal Windows pour réveiller le thread quand un event arrive
-            signal_event = win32event.CreateEvent(None, False, False, None)
-
-            # Subscription PUSH-based (efficient CPU)
+            # Subscription en mode PULL : SignalEvent=None
+            # EvtNext sera appele en boucle, pas de wait handle
             subscription = win32evtlog.EvtSubscribe(
                 channel,
                 flags,
-                SignalEvent=signal_event,
+                SignalEvent=None,
                 Query=xpath_query,
                 Bookmark=bookmark_handle,
             )
-
         except pywintypes.error as exc:
-            # Channel inexistant (typique : Sysmon non installé) ou accès refusé
             error_code = exc.winerror if hasattr(exc, "winerror") else 0
             if error_code == winerror.ERROR_EVT_CHANNEL_NOT_FOUND:
                 logger.warning(
-                    f"  ⚠ Channel '{channel}' not found on this system "
-                    f"(skip — install missing component if needed, e.g. Sysmon)"
+                    f"  Channel '{channel}' not found on this system "
+                    f"(skip - install missing component if needed, e.g. Sysmon)"
                 )
             elif error_code == winerror.ERROR_ACCESS_DENIED:
                 logger.error(
-                    f"  ❌ Access denied to channel '{channel}'. "
+                    f"  Access denied to channel '{channel}'. "
                     f"Run agent as LocalSystem or with SeSecurityPrivilege."
                 )
             else:
                 logger.error(
-                    f"  ❌ Could not subscribe to '{channel}': {exc}"
+                    f"  Could not subscribe to '{channel}': {exc}"
                 )
-            return  # on abandonne ce channel, les autres continuent
+            return
 
-        # === Boucle d'attente des events ===
+        # === Boucle de polling pull-based ===
         events_since_last_save = 0
-        BOOKMARK_SAVE_INTERVAL = 50  # sauvegarder tous les 50 events
+        consecutive_errors = 0
+        BOOKMARK_SAVE_INTERVAL = 50
 
         while not self._stop_event.is_set():
-            wait_result = win32event.WaitForSingleObject(
-                signal_event,
-                _SUBSCRIPTION_WAIT_TIMEOUT_MS,
-            )
-
-            if wait_result == win32event.WAIT_TIMEOUT:
-                continue  # check stop_event puis re-attente
-
-            # === Récupérer les events en attente (batch) ===
+            # Tenter de recuperer un batch d'events
             try:
                 events = win32evtlog.EvtNext(subscription, 100, -1, 0)
             except pywintypes.error as exc:
-                # ERROR_NO_MORE_ITEMS = file vide, normal
                 error_code = exc.winerror if hasattr(exc, "winerror") else 0
                 if error_code == winerror.ERROR_NO_MORE_ITEMS:
+                    # File vide, normal - sleep 2s puis re-poll
+                    self._stop_event.wait(timeout=_POLL_INTERVAL_SECONDS)
                     continue
+                consecutive_errors += 1
                 logger.error(
-                    f"  ❌ EvtNext failed on '{channel}': {exc}"
+                    f"  EvtNext failed on '{channel}' "
+                    f"(err {consecutive_errors}/5): {exc}"
                 )
+                if consecutive_errors >= 5:
+                    logger.error(
+                        f"  Too many EvtNext errors on '{channel}', "
+                        f"stopping thread"
+                    )
+                    break
+                self._stop_event.wait(timeout=_POLL_INTERVAL_SECONDS)
                 continue
 
-            # === Traiter chaque event ===
+            consecutive_errors = 0
+
+            if not events:
+                # Cas rare : EvtNext retourne [] sans exception
+                self._stop_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+                continue
+
+            # Traiter chaque event recu
             for event_handle in events:
                 if self._stop_event.is_set():
                     break
-
                 try:
-                    # Rendu XML de l'event
                     xml_str = win32evtlog.EvtFormatMessage(
                         None,
                         event_handle,
                         win32evtlog.EvtFormatMessageXml,
                     )
-
-                    # Parse XML -> dict structuré
                     event_dict = _parse_event_xml(xml_str)
-
-                    # Sérialise en JSON one-line (consommable par parsers.windows)
                     json_line = json.dumps(event_dict, separators=(",", ":"))
-
-                    # Update bookmark (en mémoire)
                     win32evtlog.EvtUpdateBookmark(bookmark_handle, event_handle)
-
-                    # Appel callback agent (synchrone, comme Linux)
                     try:
                         self.callback(json_line, channel)
                     except Exception as cb_exc:
                         logger.error(
                             f"Error in callback for channel '{channel}': {cb_exc}"
                         )
-
                     events_since_last_save += 1
-
                 except Exception as exc:
                     logger.warning(
-                        f"  ⚠ Failed to process event on '{channel}': {exc}"
+                        f"  Failed to process event on '{channel}': {exc}"
                     )
 
-            # === Persistance bookmark périodique ===
+            # Persistance bookmark periodique
             if events_since_last_save >= BOOKMARK_SAVE_INTERVAL:
                 self._persist_bookmark(bookmark_handle, channel)
                 events_since_last_save = 0
 
+            # Reboucle direct sur EvtNext (peut-etre plus d'events a fetch).
+            # Si la queue est vide, on dormira dans la branche
+            # except ERROR_NO_MORE_ITEMS ci-dessus.
+
         # === Sauvegarde finale du bookmark au stop ===
         try:
             self._persist_bookmark(bookmark_handle, channel)
-            logger.info(f"  ✓ Channel '{channel}' bookmark saved on stop")
+            logger.info(f"  bookmark saved on stop for '{channel}'")
         except Exception as exc:
             logger.warning(
-                f"  ⚠ Could not save final bookmark for '{channel}': {exc}"
+                f"  could not save final bookmark for '{channel}': {exc}"
             )
+
 
     def _persist_bookmark(self, bookmark_handle, channel: str) -> None:
         """Sérialise le bookmark courant en XML et le persiste sur disque."""
