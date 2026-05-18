@@ -94,6 +94,7 @@ DEFAULT_SECURITY_EVENT_IDS = [
 # Subscription flags (cf. win32evtlog SubscribeFlag constants)
 # StartAtOldestRecord = remonter dans l'historique au démarrage
 # StartAfterBookmark = continuer après le dernier bookmark sauvé
+_EvtSubscribeToFutureEvents = 1
 _EvtSubscribeStartAtOldestRecord = 2
 _EvtSubscribeStartAfterBookmark = 3
 
@@ -424,15 +425,19 @@ class WindowsLogTailer:
                         f"  ⚠ Bookmark for '{channel}' invalid ({exc}); "
                         f"falling back to oldest record"
                     )
-                    # API Windows : Bookmark doit etre None quand flags=StartAtOldestRecord
-                    # (sinon EvtSubscribe -> ERROR_INVALID_PARAMETER = 87)
+                    # API Windows : Bookmark=None + ToFutureEvents = push-based
+                    # signal_event arme immediatement, sans replay historique.
+                    # (StartAtOldestRecord chargerait tout l'historique en arriere
+                    # plan et le signal_event resterait silencieux pendant le replay)
                     bookmark_handle = None
-                    flags = _EvtSubscribeStartAtOldestRecord
+                    flags = _EvtSubscribeToFutureEvents
             else:
-                # API Windows : Bookmark doit etre None quand flags=StartAtOldestRecord
-                # (sinon EvtSubscribe -> ERROR_INVALID_PARAMETER = 87)
+                # API Windows : Bookmark=None + ToFutureEvents = push-based
+                # signal_event arme immediatement, sans replay historique.
+                # (StartAtOldestRecord chargerait tout l'historique en arriere
+                # plan et le signal_event resterait silencieux pendant le replay)
                 bookmark_handle = None
-                flags = _EvtSubscribeStartAtOldestRecord
+                flags = _EvtSubscribeToFutureEvents
 
             # Signal Windows pour réveiller le thread quand un event arrive
             signal_event = win32event.CreateEvent(None, False, False, None)
