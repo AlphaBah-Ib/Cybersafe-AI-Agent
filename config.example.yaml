@@ -55,14 +55,19 @@ sources:
   #   type: apache_access
   #   format: auto
 
-  # --- Syntaxe avancee : serveurs web IIS Windows (SOC-302) ---
+  # --- Syntaxe avancee : serveurs web IIS Windows (SOC-302 + SOC-303) ---
   # Format W3C Extended (auto-descriptif via en-tete #Fields:).
-  # NOTE : le parser W3C est pret (SOC-302). La collecte de FICHIERS sur
-  # Windows (tail + rotation IIS par date) arrive en SOC-303. En attendant,
-  # iis_access est utile sur Linux si tu recois des logs W3C depuis un
-  # reverse proxy ou un CDN.
-  # - path: C:\inetpub\logs\LogFiles\W3SVC1\u_ex*.log
+  # La collecte de fichiers IIS sur Windows est geree (tail + rotation).
+  # IMPORTANT : utilise un PATTERN (avec *) pour suivre la rotation IIS par
+  # date. IIS cree un nouveau fichier chaque jour (u_ex260522.log ->
+  # u_ex260523.log) ; le pattern u_ex*.log suit automatiquement le fichier
+  # actif et bascule a minuit sans perte. Un chemin FIXE (sans *) marche
+  # aussi mais ne suivra PAS la rotation par date (a reserver aux logs a
+  # nom stable, ex: rotation par taille).
+  # - path: C:\inetpub\logs\LogFiles\W3SVC1\u_ex*.log   # pattern (recommande)
   #   type: iis_access
+  # iis_access fonctionne aussi sur Linux si tu recois des logs W3C via un
+  # reverse proxy ou un CDN.
 
 # ── Buffer (optionnel, defaults raisonnables) ───────────────────────────
 buffer:

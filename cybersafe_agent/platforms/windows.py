@@ -26,8 +26,10 @@ Historique :
 """
 import json
 import logging
+import glob
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -306,6 +308,182 @@ def _save_bookmark(bookmarks_dir: str, channel: str, bookmark_xml: str) -> None:
 # Classe principale : WindowsLogTailer
 # =============================================================================
 
+def _is_file_path(source: str) -> bool:
+    """
+    Distingue un chemin de fichier (a tailer, ex: logs IIS) d'un nom de
+    channel Windows Event Log.
+
+    Regle 0 risque : dans le doute -> channel (False), pour ne JAMAIS casser
+    le comportement Event Log historique (SOC-200).
+
+    Fichier si la source : contient ":\\" (lettre de lecteur), commence par
+    "\\\\" (UNC), ou se termine par ".log". Les channels Event Log
+    (ex: "Microsoft-Windows-PowerShell/Operational") n'ont aucun de ces marqueurs.
+    """
+    if not source:
+        return False
+    s = source.strip()
+    if len(s) >= 3 and s[1] == ":" and s[2] == "\\":
+        return True
+    if s.startswith("\\\\"):
+        return True
+    if s.lower().endswith(".log"):
+        return True
+    return False
+
+
+class WindowsFileTailer:
+    """
+    Tail de fichiers texte sur Windows (logs IIS W3C). SOC-303.
+
+    Deux modes selon la forme du path :
+      - PATTERN (le path contient '*' ou '?') : suit le fichier le plus
+        recemment modifie matchant le glob, et bascule automatiquement quand
+        un nouveau fichier apparait (rotation IIS par date a minuit).
+      - FIXE : tail un fichier a nom stable, detecte la troncature.
+
+    Pas d'os.fstat().st_ino (non expose sur NTFS) : la rotation est detectee
+    via le glob (mode pattern) ou la taille (mode fixe).
+    """
+
+    def __init__(self, paths, callback, poll_interval: float = 1.0,
+                 rescan_interval: float = 30.0):
+        self.paths = paths
+        self.callback = callback
+        self.poll_interval = poll_interval
+        self.rescan_interval = rescan_interval
+        self._stop_event = threading.Event()
+        self._threads = []
+
+    def start(self):
+        if self._threads:
+            logger.warning("WindowsFileTailer.start() called twice; ignoring")
+            return
+        if not self.paths:
+            return
+        for path in self.paths:
+            t = threading.Thread(
+                target=self._watch, args=(path,), daemon=True,
+                name=f"filetailer-{os.path.basename(path)}",
+            )
+            t.start()
+            self._threads.append(t)
+
+    def stop(self):
+        self._stop_event.set()
+        if getattr(self, "_file_tailer", None) is not None:
+            self._file_tailer.stop()
+        for t in self._threads:
+            t.join(timeout=3.0)
+
+    def _safe_callback(self, line, path):
+        try:
+            self.callback(line, path)
+        except Exception as exc:
+            logger.error(f"Error in callback for {path}: {exc}")
+
+    def _watch(self, path):
+        if "*" in path or "?" in path:
+            self._watch_pattern(path)
+        else:
+            self._watch_fixed(path)
+
+    def _resolve_active(self, pattern):
+        """Fichier le plus recemment modifie matchant le glob (None si aucun)."""
+        matches = glob.glob(pattern)
+        if not matches:
+            return None
+        return max(matches, key=lambda fp: os.path.getmtime(fp))
+
+    def _drain(self, f, path):
+        """Lit toutes les lignes restantes jusqu'a EOF (avant bascule)."""
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            line = line.rstrip("\n").rstrip("\r")
+            if line:
+                self._safe_callback(line, path)
+
+    def _watch_pattern(self, pattern):
+        current = None
+        f = None
+        last_rescan = 0.0
+        first_open = True
+        while not self._stop_event.is_set():
+            now = time.monotonic()
+            if current is None or (now - last_rescan) >= self.rescan_interval:
+                last_rescan = now
+                active = self._resolve_active(pattern)
+                if active and active != current:
+                    if f is not None:
+                        # Rotation : finir l'ancien fichier avant de basculer
+                        self._drain(f, current)
+                        f.close()
+                    try:
+                        f = open(active, "r", encoding="utf-8", errors="replace")
+                    except (FileNotFoundError, PermissionError) as exc:
+                        logger.warning(f"  [WARN] cannot open {active}: {exc}")
+                        f = None
+                        self._stop_event.wait(self.poll_interval)
+                        continue
+                    if first_open:
+                        # 1er demarrage : tail -f depuis la fin
+                        f.seek(0, os.SEEK_END)
+                        first_open = False
+                        logger.info(f"  [WATCH] {active} (active, from end)")
+                    else:
+                        # Rotation : lire le nouveau fichier depuis le debut
+                        logger.info(f"  [ROTATE] {active} (new file, from start)")
+                    current = active
+            if f is None:
+                self._stop_event.wait(self.poll_interval)
+                continue
+            line = f.readline()
+            if line:
+                line = line.rstrip("\n").rstrip("\r")
+                if line:
+                    self._safe_callback(line, current)
+                continue
+            self._stop_event.wait(self.poll_interval)
+        if f is not None:
+            f.close()
+
+    def _watch_fixed(self, path):
+        while not self._stop_event.is_set():
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(0, os.SEEK_END)
+                    last_pos = f.tell()
+                    logger.info(f"  [WATCH] {path}")
+                    while not self._stop_event.is_set():
+                        line = f.readline()
+                        if line:
+                            last_pos = f.tell()
+                            line = line.rstrip("\n").rstrip("\r")
+                            if line:
+                                self._safe_callback(line, path)
+                            continue
+                        self._stop_event.wait(self.poll_interval)
+                        try:
+                            if os.path.getsize(path) < last_pos:
+                                logger.info(f"  [ROTATE] {path} (truncated)")
+                                break
+                        except FileNotFoundError:
+                            logger.warning(f"  [WARN] File disappeared: {path}")
+                            self._stop_event.wait(2.0)
+                            break
+            except PermissionError:
+                logger.error(f"  [ERROR] Permission denied: {path}")
+                return
+            except FileNotFoundError:
+                logger.warning(f"  [WARN] File not found: {path} (waiting...)")
+                self._stop_event.wait(5.0)
+            except Exception as exc:
+                logger.error(f"  [ERROR] Unexpected error on {path}: {exc}")
+                self._stop_event.wait(5.0)
+
+
 class WindowsLogTailer:
     """
     Surveille plusieurs channels Windows Event Log et appelle un callback
@@ -337,8 +515,18 @@ class WindowsLogTailer:
         bookmarks_dir: Optional[str] = None,
         security_event_ids: Optional[List[int]] = None,
     ):
-        self.channels = paths or list(DEFAULT_WINDOWS_CHANNELS)
+        # SOC-303 : separer les sources en channels Event Log et fichiers.
+        raw_sources = paths or list(DEFAULT_WINDOWS_CHANNELS)
+        self.channels = [s for s in raw_sources if not _is_file_path(s)]
+        self._file_paths = [s for s in raw_sources if _is_file_path(s)]
         self.callback = callback
+        self._file_tailer = None
+        if self._file_paths:
+            self._file_tailer = WindowsFileTailer(
+                paths=self._file_paths,
+                callback=callback,
+                poll_interval=poll_interval,
+            )
         # poll_interval ignoré : push-based via EvtSubscribe
 
         self.bookmarks_dir = bookmarks_dir or os.environ.get(
@@ -360,8 +548,16 @@ class WindowsLogTailer:
         if self._threads:
             logger.warning("WindowsLogTailer.start() called twice; ignoring")
             return
+        # SOC-303 : demarrer le sous-tailer fichiers (IIS) s'il existe.
+        if self._file_tailer is not None:
+            logger.info(
+                f"  Starting file tailer for {len(self._file_paths)} file source(s)"
+            )
+            self._file_tailer.start()
+
         if not self.channels:
-            logger.warning("⚠ No Windows channels configured — tailer is idle")
+            if self._file_tailer is None:
+                logger.warning("No Windows channels configured - tailer is idle")
             return
 
         # S'assurer que le dossier des bookmarks existe (peut faillir si
@@ -371,7 +567,7 @@ class WindowsLogTailer:
             logger.info(f"  Bookmarks dir: {self.bookmarks_dir}")
         except OSError as exc:
             logger.warning(
-                f"  ⚠ Bookmarks directory not writable ({exc}). "
+                f"  [WARN] Bookmarks directory not writable ({exc}). "
                 f"Events may be re-processed after restart."
             )
 
@@ -384,7 +580,7 @@ class WindowsLogTailer:
             )
             t.start()
             self._threads.append(t)
-            logger.info(f"  ✓ Watching channel: {channel}")
+            logger.info(f"  [WATCH] channel: {channel}")
 
     def stop(self):
         """Arrête proprement tous les threads (timeout 3s par thread)."""
@@ -569,5 +765,5 @@ class WindowsLogTailer:
             _save_bookmark(self.bookmarks_dir, channel, bookmark_xml)
         except pywintypes.error as exc:
             logger.warning(
-                f"  ⚠ EvtRender bookmark failed for '{channel}': {exc}"
+                f"  [WARN] EvtRender bookmark failed for '{channel}': {exc}"
             )
