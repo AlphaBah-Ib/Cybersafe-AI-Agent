@@ -57,7 +57,7 @@ class LinuxLogTailer:
             logger.warning("LinuxLogTailer.start() called twice; ignoring second call")
             return
         if not self.paths:
-            logger.warning("⚠ No source files configured — tailer is idle")
+            logger.warning("No source files configured - tailer is idle")
             return
         for path in self.paths:
             t = threading.Thread(
@@ -77,7 +77,7 @@ class LinuxLogTailer:
 
     def _tail_loop(self, path: str):
         """Boucle de tail pour un fichier (1 thread par fichier)."""
-        logger.info(f"  ✓ Watching: {path}")
+        logger.info(f"  [WATCH] {path}")
 
         while not self._stop_event.is_set():
             try:
@@ -106,29 +106,29 @@ class LinuxLogTailer:
                             current_inode = os.stat(path).st_ino
                             if current_inode != inode:
                                 logger.info(
-                                    f"  ↻ Log rotated: {path} (re-opening)"
+                                    f"  [ROTATE] {path} (re-opening)"
                                 )
                                 break  # ré-ouverture via boucle externe
                             # Tronqué ?
                             if f.tell() > os.fstat(f.fileno()).st_size:
                                 logger.info(
-                                    f"  ↻ Log truncated: {path} (re-opening)"
+                                    f"  [ROTATE] {path} truncated (re-opening)"
                                 )
                                 break
                         except FileNotFoundError:
-                            logger.warning(f"  ⚠ File disappeared: {path}")
+                            logger.warning(f"  [WARN] File disappeared: {path}")
                             time.sleep(2.0)
                             break
 
             except PermissionError:
                 logger.error(
-                    f"  ❌ Permission denied: {path} "
+                    f"  [ERROR] Permission denied: {path} "
                     f"(run with sudo or fix groups)"
                 )
                 return  # on abandonne ce fichier
             except FileNotFoundError:
-                logger.warning(f"  ⚠ File not found: {path} (waiting...)")
+                logger.warning(f"  [WARN] File not found: {path} (waiting...)")
                 time.sleep(5.0)
             except Exception as e:
-                logger.error(f"  ❌ Unexpected error on {path}: {e}")
+                logger.error(f"  [ERROR] Unexpected error on {path}: {e}")
                 time.sleep(5.0)

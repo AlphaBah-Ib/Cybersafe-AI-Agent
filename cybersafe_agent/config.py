@@ -52,13 +52,64 @@ def _default_bookmarks_dir() -> str:
 
 
 @dataclass
+class LogSource:
+    """
+    Une source de log a surveiller (SOC-300).
+
+    Retrocompatibilite : dans l'ancien format YAML, une source est une simple
+    string (chemin). On la convertit alors en LogSource(path=s, type="auto"),
+    ce qui preserve le comportement historique (detection parser par contenu).
+
+    Nouveau format (SOC-300) : objet {path, type, format} permettant de router
+    explicitement vers un parser dedie (nginx_access, nginx_error, etc.).
+
+    Champs :
+        path       : chemin absolu du fichier de log
+        type       : "auto" (defaut) | "nginx_access" | "nginx_error"
+                     "auto" => detection par contenu (syslog Linux / JSON Windows)
+        format     : "combined" (defaut nginx) | "custom"
+                     Pertinent uniquement pour type == "nginx_access"
+        log_format : format string nginx custom (si format == "custom", V2)
+    """
+
+    path: str
+    type: str = "auto"
+    format: str = "combined"
+    log_format: str = ""
+
+    @staticmethod
+    def from_yaml_item(item) -> "LogSource":
+        """
+        Construit un LogSource depuis un element YAML (str OU dict).
+
+        - str  : ancien format, juste un chemin -> type "auto"
+        - dict : nouveau format {path, type, format, log_format}
+
+        Leve ValueError si l'element n'est ni str ni dict.
+        """
+        if isinstance(item, str):
+            return LogSource(path=item.strip(), type="auto")
+        if isinstance(item, dict):
+            path = str(item.get("path", "")).strip()
+            return LogSource(
+                path=path,
+                type=str(item.get("type", "auto")).strip() or "auto",
+                format=str(item.get("format", "combined")).strip() or "combined",
+                log_format=str(item.get("log_format", "")).strip(),
+            )
+        raise ValueError(
+            f"Source invalide (ni str ni dict) : {item!r}"
+        )
+
+
+@dataclass
 class AgentConfig:
     """Configuration de l'agent (chargée depuis YAML)."""
 
     # ── Obligatoires ─────────────────────────────────────────────────────
     token: str
     api_url: str
-    sources: List[str]
+    sources: List[LogSource]
 
     # ── Buffer ───────────────────────────────────────────────────────────
     buffer_max_size: int = 100
@@ -161,7 +212,11 @@ def load_config(path: str = None) -> AgentConfig:
     return AgentConfig(
         token=token,
         api_url=raw["api_url"].strip(),
-        sources=[s.strip() for s in raw["sources"] if s.strip()],
+        sources=[
+            LogSource.from_yaml_item(item)
+            for item in raw["sources"]
+            if item  # filtre les entrees vides (None, "", {})
+        ],
         buffer_max_size=int(buffer_cfg.get("max_size", 100)),
         buffer_flush_interval=float(buffer_cfg.get("flush_interval", 2.0)),
         log_file=raw.get("log_file", os_defaults["log_file"]),

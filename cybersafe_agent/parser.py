@@ -30,18 +30,46 @@ from . import parsers as _parsers_pkg  # noqa: F401 — force load du package
 _WINDOWS_JSON_PREFIX = '{"channel":'
 
 
-def line_to_event(line: str, source_path: str) -> dict:
+def line_to_event(
+    line: str,
+    source_path: str,
+    source_type: str = "auto",
+    source_format: str = "combined",
+) -> dict:
     """
-    Transforme une ligne de log (Linux syslog OU Windows JSON) en payload
-    event prêt pour /api/soc/ingest/.
+    Transforme une ligne de log en payload event prêt pour /api/soc/ingest/.
 
-    Détection automatique du format :
-      - Ligne commence par `{"channel":` → Windows Event Log (JSON)
-      - Sinon → Linux/macOS syslog (texte brut)
+    Routing du parser selon le type de source declare dans la config (SOC-300) :
+      - source_type == "nginx_access" -> parsers.nginx.line_to_event_access
+      - source_type == "nginx_error"  -> parsers.nginx.line_to_event_error
+      - source_type == "auto" (defaut) -> detection par CONTENU :
+            * ligne commence par `{"channel":` -> Windows Event Log (JSON)
+            * sinon                            -> Linux/macOS syslog (texte brut)
 
-    Le contrat de retour est identique pour les 2 cas (dict avec keys
+    Le mode "auto" preserve a l'identique le comportement historique
+    (SOC-011 + SOC-200), garantissant ZERO regression sur les sources
+    existantes (auth.log, syslog, Windows Event Log).
+
+    Le contrat de retour est identique pour tous les cas (dict avec keys
     source, raw, event_type, severity, ts, parsed).
+
+    Args:
+        line: ligne brute de log
+        source_path: chemin du fichier source (pour le champ "source")
+        source_type: type de la source ("auto" | "nginx_access" | "nginx_error")
+        source_format: format nginx ("combined" | "custom"), pertinent pour
+                       nginx_access uniquement
     """
+    # ── Routing explicite par type (SOC-300) ────────────────────────────────
+    if source_type == "nginx_access":
+        from .parsers.nginx import line_to_event_access
+        return line_to_event_access(line, source_path, source_format)
+
+    if source_type == "nginx_error":
+        from .parsers.nginx import line_to_event_error
+        return line_to_event_error(line, source_path)
+
+    # ── Mode "auto" : detection par contenu (comportement historique) ───────
     # On strip ici pour gérer les lignes avec espaces/tabs au début.
     stripped = line.lstrip() if line else ""
 

@@ -15,12 +15,32 @@ token: csa_REMPLACE_PAR_TON_TOKEN_ICI
 api_url: https://cybersafe-ai-production.up.railway.app/api
 
 # ── Fichiers de log à surveiller ────────────────────────────────────────
+#
+# Deux syntaxes sont acceptees (mixables dans la meme liste) :
+#
+#   1. SIMPLE (retrocompatible) — juste un chemin.
+#      Le parser est detecte automatiquement par le contenu de la ligne
+#      (syslog Linux ou Event Log Windows). Convient pour auth.log, syslog, etc.
+#
+#   2. AVANCEE (SOC-300) — objet avec type et format explicites.
+#      Permet de router vers un parser dedie (nginx, et plus tard IIS, Apache).
+#      Champs :
+#        path   : chemin absolu du fichier
+#        type   : auto (defaut) | nginx_access | nginx_error
+#        format : combined (defaut nginx) | custom   [pour nginx_access]
+#
 sources:
-  - /var/log/auth.log         # SSH, sudo, login (Ubuntu/Debian)
-  # - /var/log/secure         # RHEL/CentOS/Rocky équivalent
-  # - /var/log/syslog         # Système général
-  # - /var/log/nginx/access.log
-  # - /var/log/nginx/error.log
+  # --- Syntaxe simple (type auto) ---
+  - /var/log/auth.log               # SSH, sudo, login (Ubuntu/Debian)
+  # - /var/log/secure               # RHEL/CentOS/Rocky equivalent
+  # - /var/log/syslog               # Systeme general
+
+  # --- Syntaxe avancee : serveurs web nginx (SOC-300) ---
+  # - path: /var/log/nginx/access.log
+  #   type: nginx_access
+  #   format: combined              # combined = format nginx par defaut
+  # - path: /var/log/nginx/error.log
+  #   type: nginx_error
 
 # ── Buffer (optionnel, defaults raisonnables) ───────────────────────────
 buffer:

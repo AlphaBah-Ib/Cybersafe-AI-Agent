@@ -190,13 +190,24 @@ def run(stop_event: Optional[threading.Event] = None, config_path: Optional[str]
     buffer.start()
 
     # ── 5. Tailer (un thread par fichier) ────────────────────────────────
+    # Mapping path -> LogSource pour retrouver le type/format de chaque source.
+    # Permet au callback de router vers le bon parser (SOC-300) sans changer
+    # la signature du tailer (qui reste sur des chemins str, option B).
+    source_by_path = {src.path: src for src in config.sources}
+
     def on_new_line(line: str, source_path: str):
         """Callback appele pour chaque nouvelle ligne capturee."""
-        event = line_to_event(line, source_path)
+        # Retrouve le LogSource pour connaitre son type (nginx_access, etc.).
+        # Fallback "auto" si le path n'est pas dans le mapping (defensif).
+        src = source_by_path.get(source_path)
+        if src is not None:
+            event = line_to_event(line, source_path, src.type, src.format)
+        else:
+            event = line_to_event(line, source_path)
         buffer.add(event)
 
     tailer = LogTailer(
-        paths=config.sources,
+        paths=[src.path for src in config.sources],
         callback=on_new_line,
         poll_interval=config.tail_poll_interval,
     )
