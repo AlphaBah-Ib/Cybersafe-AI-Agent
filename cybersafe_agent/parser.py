@@ -42,6 +42,7 @@ def line_to_event(
     Routing du parser selon le type de source declare dans la config (SOC-300) :
       - source_type == "nginx_access" -> parsers.nginx.line_to_event_access
       - source_type == "nginx_error"  -> parsers.nginx.line_to_event_error
+      - source_type == "apache_access" -> parsers.apache.line_to_event_access
       - source_type == "auto" (defaut) -> detection par CONTENU :
             * ligne commence par `{"channel":` -> Windows Event Log (JSON)
             * sinon                            -> Linux/macOS syslog (texte brut)
@@ -68,6 +69,14 @@ def line_to_event(
     if source_type == "nginx_error":
         from .parsers.nginx import line_to_event_error
         return line_to_event_error(line, source_path)
+
+    # ── Apache access.log (SOC-301) ─────────────────────────────────────────
+    # Apache combined == nginx combined ; le parser apache reutilise la regex
+    # combined de nginx et ajoute le format "common" (CLF). Auto-detection si
+    # source_format vaut "auto" ou n'est pas precise.
+    if source_type == "apache_access":
+        from .parsers.apache import line_to_event_access as _apache_access
+        return _apache_access(line, source_path, source_format)
 
     # ── Mode "auto" : detection par contenu (comportement historique) ───────
     # On strip ici pour gérer les lignes avec espaces/tabs au début.

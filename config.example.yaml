@@ -26,8 +26,10 @@ api_url: https://cybersafe-ai-production.up.railway.app/api
 #      Permet de router vers un parser dedie (nginx, et plus tard IIS, Apache).
 #      Champs :
 #        path   : chemin absolu du fichier
-#        type   : auto (defaut) | nginx_access | nginx_error
-#        format : combined (defaut nginx) | custom   [pour nginx_access]
+#        type   : auto (defaut) | nginx_access | nginx_error | apache_access
+#        format : combined | common | custom
+#                 - nginx_access  : combined (defaut) | custom
+#                 - apache_access : auto (defaut) | combined | common (CLF)
 #
 sources:
   # --- Syntaxe simple (type auto) ---
@@ -41,6 +43,16 @@ sources:
   #   format: combined              # combined = format nginx par defaut
   # - path: /var/log/nginx/error.log
   #   type: nginx_error
+
+  # --- Syntaxe avancee : serveurs web Apache (SOC-301) ---
+  # Apache combined == nginx combined. Le format "common" (CLF) est aussi
+  # gere (sans Referer/User-Agent). format: auto detecte automatiquement.
+  # - path: /var/log/apache2/access.log   # Debian / Ubuntu
+  #   type: apache_access
+  #   format: auto                  # auto (defaut) | combined | common
+  # - path: /var/log/httpd/access_log     # RHEL / CentOS / Rocky
+  #   type: apache_access
+  #   format: auto
 
 # ── Buffer (optionnel, defaults raisonnables) ───────────────────────────
 buffer:
