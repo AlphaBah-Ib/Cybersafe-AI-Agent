@@ -43,3 +43,7 @@ build/
 dist/
 build-venv/
 *.spec.bak
+
+# Backups manuels de session (config.py.bak.YYYYMMDD, etc.)
+*.bak
+*.bak.*
