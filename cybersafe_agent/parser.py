@@ -43,6 +43,7 @@ def line_to_event(
       - source_type == "nginx_access" -> parsers.nginx.line_to_event_access
       - source_type == "nginx_error"  -> parsers.nginx.line_to_event_error
       - source_type == "apache_access" -> parsers.apache.line_to_event_access
+      - source_type == "iis_access"   -> parsers.iis.line_to_event_access
       - source_type == "auto" (defaut) -> detection par CONTENU :
             * ligne commence par `{"channel":` -> Windows Event Log (JSON)
             * sinon                            -> Linux/macOS syslog (texte brut)
@@ -77,6 +78,14 @@ def line_to_event(
     if source_type == "apache_access":
         from .parsers.apache import line_to_event_access as _apache_access
         return _apache_access(line, source_path, source_format)
+
+    # ── IIS access logs W3C (SOC-302) ───────────────────────────────────────
+    # Format W3C Extended (auto-descriptif via en-tete #Fields:). Le parser
+    # est stateful : il retient l'ordre des colonnes par fichier. source_path
+    # sert de cle pour cet etat, d'ou son importance ici.
+    if source_type == "iis_access":
+        from .parsers.iis import line_to_event_access as _iis_access
+        return _iis_access(line, source_path, source_format)
 
     # ── Mode "auto" : detection par contenu (comportement historique) ───────
     # On strip ici pour gérer les lignes avec espaces/tabs au début.

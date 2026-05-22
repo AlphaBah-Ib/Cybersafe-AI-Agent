@@ -26,10 +26,11 @@ api_url: https://cybersafe-ai-production.up.railway.app/api
 #      Permet de router vers un parser dedie (nginx, et plus tard IIS, Apache).
 #      Champs :
 #        path   : chemin absolu du fichier
-#        type   : auto (defaut) | nginx_access | nginx_error | apache_access
+#        type   : auto | nginx_access | nginx_error | apache_access | iis_access
 #        format : combined | common | custom
 #                 - nginx_access  : combined (defaut) | custom
 #                 - apache_access : auto (defaut) | combined | common (CLF)
+#                 - iis_access    : W3C Extended (auto via en-tete #Fields:)
 #
 sources:
   # --- Syntaxe simple (type auto) ---
@@ -53,6 +54,15 @@ sources:
   # - path: /var/log/httpd/access_log     # RHEL / Rocky / AlmaLinux
   #   type: apache_access
   #   format: auto
+
+  # --- Syntaxe avancee : serveurs web IIS Windows (SOC-302) ---
+  # Format W3C Extended (auto-descriptif via en-tete #Fields:).
+  # NOTE : le parser W3C est pret (SOC-302). La collecte de FICHIERS sur
+  # Windows (tail + rotation IIS par date) arrive en SOC-303. En attendant,
+  # iis_access est utile sur Linux si tu recois des logs W3C depuis un
+  # reverse proxy ou un CDN.
+  # - path: C:\inetpub\logs\LogFiles\W3SVC1\u_ex*.log
+  #   type: iis_access
 
 # ── Buffer (optionnel, defaults raisonnables) ───────────────────────────
 buffer:
