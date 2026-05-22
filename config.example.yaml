@@ -50,7 +50,7 @@ sources:
   # - path: /var/log/apache2/access.log   # Debian / Ubuntu
   #   type: apache_access
   #   format: auto                  # auto (defaut) | combined | common
-  # - path: /var/log/httpd/access_log     # RHEL / CentOS / Rocky
+  # - path: /var/log/httpd/access_log     # RHEL / Rocky / AlmaLinux
   #   type: apache_access
   #   format: auto
 
