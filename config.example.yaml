@@ -34,7 +34,7 @@ api_url: https://cybersafe-ai-production.up.railway.app/api
 sources:
   # --- Syntaxe simple (type auto) ---
   - /var/log/auth.log               # SSH, sudo, login (Ubuntu/Debian)
-  # - /var/log/secure               # RHEL/CentOS/Rocky equivalent
+  # - /var/log/secure               # RHEL / Rocky / AlmaLinux equivalent
   # - /var/log/syslog               # Systeme general
 
   # --- Syntaxe avancee : serveurs web nginx (SOC-300) ---
