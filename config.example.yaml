@@ -12,7 +12,7 @@
 token: csa_REMPLACE_PAR_TON_TOKEN_ICI
 
 # ── URL de l'API Cybersafe ──────────────────────────────────────────────
-api_url: https://cybersafe-ai-production.up.railway.app/api
+api_url: https://app.cybersafe-ai.com/api
 
 # ── Fichiers de log à surveiller ────────────────────────────────────────
 #
