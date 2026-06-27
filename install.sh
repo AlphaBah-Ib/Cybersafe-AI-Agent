@@ -148,6 +148,39 @@ for grp in adm syslog; do
     fi
 done
 
+# --- 1b. Ensure a readable log source (auth.log) --------------------------
+# On a minimal Debian without rsyslog, /var/log/auth.log does not exist and
+# the agent loops on "File not found ... waiting". Ensure a syslog daemon is
+# present so the standard log files (auth.log / secure) get created.
+if [ ! -f /var/log/auth.log ] && [ ! -f /var/log/secure ]; then
+    log_warn "No /var/log/auth.log (or /var/log/secure) found - likely no syslog daemon."
+    if command -v rsyslogd >/dev/null 2>&1; then
+        log_info "rsyslog is installed but auth.log is missing; enabling rsyslog..."
+        systemctl enable --now rsyslog >/dev/null 2>&1 || true
+    elif command -v apt-get >/dev/null 2>&1; then
+        log_info "Installing rsyslog to create the syslog files (auth.log)..."
+        if apt-get install -y rsyslog >/dev/null 2>&1; then
+            systemctl enable --now rsyslog >/dev/null 2>&1 || true
+            log_ok "rsyslog installed and enabled."
+        else
+            log_warn "Could not install rsyslog automatically."
+            log_warn "Install a syslog daemon manually, or set 'log_files' in ${CONFIG_DIR}/config.yaml."
+        fi
+    else
+        log_warn "No apt-get available; cannot auto-install rsyslog."
+        log_warn "Ensure a syslog source exists or adjust 'log_files' in ${CONFIG_DIR}/config.yaml."
+    fi
+    # Give the syslog daemon a moment to create the files
+    sleep 1
+    if [ -f /var/log/auth.log ] || [ -f /var/log/secure ]; then
+        log_ok "Auth log source is now available."
+    else
+        log_warn "auth.log still absent - the agent will wait until a log source appears."
+    fi
+else
+    log_ok "Auth log source present."
+fi
+
 # --- 2. Create directories ------------------------------------------------
 
 log_info "Creating directories..."

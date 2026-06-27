@@ -121,7 +121,15 @@ qu'il fait :
 1. Cree le groupe et l'utilisateur systeme **`cybersafe`** (sans shell,
    `/usr/sbin/nologin`, pas de home login).
 2. Ajoute `cybersafe` aux groupes **`adm`** et **`syslog`** pour lui donner le droit
-   de lire `/var/log/auth.log` et consorts **sans etre root**.
+   de lire `/var/log/auth.log` et consorts **sans etre root**. Si l'un de ces
+   groupes n'existe pas (Debian minimal sans rsyslog), il est **cree
+   automatiquement** (sinon le service systemd echouerait en `216/GROUP`).
+   L'installeur verifie aussi la presence d'une **source de logs** : si ni
+   `/var/log/auth.log` (Debian/Ubuntu) ni `/var/log/secure` (RHEL) n'existe,
+   il **installe et active `rsyslog`** pour creer ces fichiers — sinon l'agent
+   attendrait indefiniment (`File not found: /var/log/auth.log (waiting...)`).
+   Si l'install auto echoue (pas de reseau/`apt-get`), installez un demon
+   syslog manuellement ou ajustez `log_files` dans `config.yaml`.
 3. Cree les repertoires :
    - `/opt/cybersafe-agent` — code de l'agent + virtualenv
    - `/etc/cybersafe` — configuration (lecture seule au runtime)
