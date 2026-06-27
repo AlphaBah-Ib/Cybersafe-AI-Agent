@@ -28,6 +28,8 @@ import signal
 import sys
 import threading
 import time
+
+from cybersafe_agent.port_inventory import build_port_inventory_event
 from pathlib import Path
 from typing import Optional
 
@@ -130,6 +132,27 @@ def build_spool(config: AgentConfig):
 # Main agent loop
 # =============================================================================
 
+def _port_inventory_loop(buffer, config, stop_event):
+    """
+    Boucle d'inventaire des ports (SOC-PORTS). Thread daemon.
+
+    1er releve ~30s apres le demarrage (pour ne pas attendre un cycle complet),
+    puis toutes les config.port_scan_interval secondes. Pousse l'event dans le
+    buffer standard (meme pipeline que les logs). S'arrete via stop_event.
+    """
+    if stop_event.wait(timeout=30.0):
+        return
+    while not stop_event.is_set():
+        try:
+            event = build_port_inventory_event()
+            buffer.add(event)
+            logger.info("[port-inventory] releve envoye (%s)", event.get("raw", ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[port-inventory] releve echoue: %s", exc)
+        if stop_event.wait(timeout=config.port_scan_interval):
+            break
+
+
 def run(stop_event: Optional[threading.Event] = None, config_path: Optional[str] = None):
     """
     Boucle principale de l'agent.
@@ -230,6 +253,20 @@ def run(stop_event: Optional[threading.Event] = None, config_path: Optional[str]
         if not is_windows():
             signal.signal(signal.SIGTERM, handle_signal)
 
+    # ── 6b. Thread d'inventaire des ports (SOC-PORTS) ────────────────────
+    port_thread = None
+    if getattr(config, "port_scan_enabled", True):
+        port_thread = threading.Thread(
+            target=_port_inventory_loop,
+            args=(buffer, config, stop_event),
+            name="port-inventory",
+            daemon=True,
+        )
+        port_thread.start()
+        logger.info(
+            "[port-inventory] active (intervalle %ss)", config.port_scan_interval
+        )
+
     logger.info("Surveillance active. Ctrl+C pour quitter (ou stop via SCM).")
 
     # ── 7. Boucle d'attente cross-OS ────────────────────────────────────
@@ -247,6 +284,9 @@ def run(stop_event: Optional[threading.Event] = None, config_path: Optional[str]
     logger.info("Arret du tailer...")
     tailer.stop()
 
+    if port_thread is not None:
+        logger.info("Arret de l'inventaire des ports...")
+        port_thread.join(timeout=5.0)
     logger.info("Flush final du buffer...")
     buffer.stop()
 

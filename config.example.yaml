@@ -94,6 +94,13 @@ log_level: INFO               # DEBUG / INFO / WARNING / ERROR
 # ── Tail (avancé) ───────────────────────────────────────────────────────
 tail_poll_interval: 1.0       # Vérification toutes les 1s
 
+# ── Inventaire des ports ouverts (SOC-PORTS) ────────────────────────────
+# L'agent recense periodiquement les ports en ecoute (ss -tlnp, LOCAL,
+# aucun scan reseau). Permet de detecter une surface d'attaque inattendue
+# (service expose oublie). Optionnel : valeurs par defaut ci-dessous.
+port_scan_enabled: true       # false pour desactiver l'inventaire des ports
+port_scan_interval: 21600     # Intervalle entre 2 releves, en secondes (6h)
+
 # ── Retry réseau (avancé) ───────────────────────────────────────────────
 retry_max_attempts: 6
 retry_base_delay: 1.0
