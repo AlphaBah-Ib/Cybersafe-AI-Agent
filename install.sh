@@ -129,17 +129,22 @@ else
 fi
 
 # Add cybersafe to adm and syslog groups (read /var/log/auth.log etc.)
+# Note: the systemd unit declares SupplementaryGroups=adm syslog. On a minimal
+# Debian without rsyslog, the 'syslog' group is absent and systemd refuses to
+# start the service (status=216/GROUP). So we CREATE the group if missing
+# instead of skipping, then add the agent user to it.
 for grp in adm syslog; do
-    if getent group "${grp}" >/dev/null; then
-        if id -nG "${AGENT_USER}" | tr ' ' '\n' | grep -qx "${grp}"; then
-            log_ok "User '${AGENT_USER}' already in group '${grp}'."
-        else
-            log_info "Adding '${AGENT_USER}' to group '${grp}'..."
-            usermod -aG "${grp}" "${AGENT_USER}"
-            log_ok "Added '${AGENT_USER}' to group '${grp}'."
-        fi
+    if ! getent group "${grp}" >/dev/null; then
+        log_info "Group '${grp}' absent, creating it (required by the systemd unit)..."
+        groupadd --system "${grp}"
+        log_ok "Group '${grp}' created."
+    fi
+    if id -nG "${AGENT_USER}" | tr ' ' '\n' | grep -qx "${grp}"; then
+        log_ok "User '${AGENT_USER}' already in group '${grp}'."
     else
-        log_warn "Group '${grp}' does not exist on this system, skipping."
+        log_info "Adding '${AGENT_USER}' to group '${grp}'..."
+        usermod -aG "${grp}" "${AGENT_USER}"
+        log_ok "Added '${AGENT_USER}' to group '${grp}'."
     fi
 done
 
