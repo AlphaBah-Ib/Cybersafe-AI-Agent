@@ -66,6 +66,17 @@ sources:
   # nom stable, ex: rotation par taille).
   # - path: C:\inetpub\logs\LogFiles\W3SVC1\u_ex*.log   # pattern (recommande)
   #   type: iis_access
+
+  # --- Logs de pare-feu : ufw / iptables / nftables ---
+  # Lit les paquets bloques (SRC=, DPT=, action BLOCK/DROP). Les regles
+  # backend agregent par IP source pour detecter scan de ports, flood et
+  # tentatives repetees. Active la journalisation firewall au prealable :
+  #   ufw logging on        (ufw -> /var/log/ufw.log)
+  #   ou iptables -A ... -j LOG  (-> /var/log/kern.log)
+  # - path: /var/log/ufw.log
+  #   type: firewall
+  # - path: /var/log/kern.log              # iptables/nftables via kernel log
+  #   type: firewall
   # iis_access fonctionne aussi sur Linux si tu recois des logs W3C via un
   # reverse proxy ou un CDN.
 

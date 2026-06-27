@@ -87,6 +87,14 @@ def line_to_event(
         from .parsers.iis import line_to_event_access as _iis_access
         return _iis_access(line, source_path, source_format)
 
+    # ── Logs de pare-feu : ufw / iptables / nftables (SOC firewall) ─────────
+    # Source explicite type=firewall (ex: /var/log/ufw.log, /var/log/kern.log).
+    # Le parser extrait src_ip/dst_port/action et pose event_kind=
+    # port_scan_attempt, consomme par les regles d'agregation backend.
+    if source_type == "firewall":
+        from .parsers.firewall import line_to_event as _firewall_line_to_event
+        return _firewall_line_to_event(line, source_path)
+
     # ── Mode "auto" : detection par contenu (comportement historique) ───────
     # On strip ici pour gérer les lignes avec espaces/tabs au début.
     stripped = line.lstrip() if line else ""
