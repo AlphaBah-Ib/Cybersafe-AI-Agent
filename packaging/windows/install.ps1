@@ -23,7 +23,7 @@
 [CmdletBinding()]
 param(
     [string]$Token = '',
-    [string]$ApiUrl = 'https://cybersafe-ai-production.up.railway.app/api',
+    [string]$ApiUrl = 'https://app.cybersafe-ai.com/api',
     [switch]$Unattended,
     [switch]$SkipNssm  # for testing without service install
 )
@@ -246,7 +246,7 @@ function New-ConfigFile {
     # Replace placeholders
     $configContent = $template `
         -replace 'csa_REMPLACE_PAR_TON_TOKEN_ICI', $AgentToken `
-        -replace 'https://cybersafe-ai-production\.up\.railway\.app/api', $ApiUrl
+        -replace 'https://app\.cybersafe-ai\.com/api', $ApiUrl
 
     # Adjust paths for Windows (the template has Linux paths)
     $configContent = $configContent `
