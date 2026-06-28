@@ -7,7 +7,7 @@ Le path par défaut du fichier config dépend de l'OS (cf. paths.py) :
 
 Format attendu (config.example.yaml) — défauts cross-OS :
     token: csa_xxxxxxxxxxxxxxx
-    api_url: https://cybersafe-ai-production.up.railway.app/api
+    api_url: https://app.cybersafe-ai.com/api
     sources:
       - /var/log/auth.log         # Linux  (champ obligatoire, peut être vide [] sur Windows)
       - /var/log/syslog

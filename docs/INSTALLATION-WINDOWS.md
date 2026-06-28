@@ -56,7 +56,7 @@ L'agent fonctionne comme un **service Windows** (similaire à un antivirus), ave
     [Sender]                (HTTPS + retry exponentiel)
             |
             v
-    [Backend Cybersafe-AI]  (https://cybersafe-ai-production.up.railway.app)
+    [Backend Cybersafe-AI]  (https://app.cybersafe-ai.com)
             ^
             |
     [Spool]                 (résilience disque si réseau down)
@@ -110,7 +110,7 @@ L'agent fonctionne comme un **service Windows** (similaire à un antivirus), ave
 
 L'agent doit pouvoir établir une connexion **HTTPS sortante** (TCP/443) vers :
 
-    https://cybersafe-ai-production.up.railway.app
+    https://app.cybersafe-ai.com
 
 Aucun port entrant n'est requis. Si vous avez un proxy d'entreprise, configurez-le via les variables d'environnement Windows (cf. section 7.4).
 
@@ -244,7 +244,7 @@ Le token est déjà écrit dans `config.yaml` automatiquement.
 ```yaml
 agent:
   token: csa_VOTRE_TOKEN_ICI
-  backend_url: https://cybersafe-ai-production.up.railway.app/api/soc/ingest/
+  backend_url: https://app.cybersafe-ai.com/api/soc/ingest/
   hostname: VOTRE_NOM_MACHINE
 
 channels:
@@ -351,7 +351,7 @@ L'installation est terminée. Passez à la **section 6** pour vérifier.
 # Token agent (obtenu depuis le dashboard)
 agent:
   token: csa_xxxxxxxxxxxxxxx
-  backend_url: https://cybersafe-ai-production.up.railway.app/api/soc/ingest/
+  backend_url: https://app.cybersafe-ai.com/api/soc/ingest/
   hostname: VOTRE_NOM_MACHINE
 
 # Fichier de log local
@@ -542,7 +542,7 @@ Vous devriez voir :
 
 ```powershell
 # Test ping HTTPS du backend
-Invoke-WebRequest -Uri "https://cybersafe-ai-production.up.railway.app/api/health/" -UseBasicParsing
+Invoke-WebRequest -Uri "https://app.cybersafe-ai.com/api/health/" -UseBasicParsing
 
 # Doit retourner StatusCode 200
 ```
@@ -1087,13 +1087,13 @@ Une version signée avec certificat EV est prévue en v2 (cf. section 8.5).
 
 ```powershell
 # Test 1 : DNS resolve
-Resolve-DnsName cybersafe-ai-production.up.railway.app
+Resolve-DnsName app.cybersafe-ai.com
 
 # Test 2 : Ping TCP/443
-Test-NetConnection -ComputerName cybersafe-ai-production.up.railway.app -Port 443
+Test-NetConnection -ComputerName app.cybersafe-ai.com -Port 443
 
 # Test 3 : HTTPS health endpoint
-Invoke-WebRequest -Uri "https://cybersafe-ai-production.up.railway.app/api/health/" -UseBasicParsing
+Invoke-WebRequest -Uri "https://app.cybersafe-ai.com/api/health/" -UseBasicParsing
 ```
 
 **Causes possibles** :
@@ -1269,7 +1269,7 @@ notepad "C:\ProgramData\Cybersafe\config\config.yaml"
 Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*Cybersafe*" } | ForEach-Object { $_.Uninstall() }
 
 # Health check backend
-Invoke-WebRequest -Uri "https://cybersafe-ai-production.up.railway.app/api/health/" -UseBasicParsing
+Invoke-WebRequest -Uri "https://app.cybersafe-ai.com/api/health/" -UseBasicParsing
 
 # Service zombie cleanup
 sc.exe delete CybersafeAgent

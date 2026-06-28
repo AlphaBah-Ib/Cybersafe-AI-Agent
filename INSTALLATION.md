@@ -5,7 +5,7 @@ configurer pour collecter les logs systeme **et** les logs de serveurs web (ngin
 Apache, IIS).
 
 **Derniere mise a jour** : 22 mai 2026
-**Version agent** : v1.5.0 (tag Git `aa1d6fe`)
+**Version agent** : v1.1.0
 **Repo** : https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
 
 ---
@@ -171,7 +171,7 @@ Remplace le token placeholder par ton vrai token :
 
 ```yaml
 token: csa_REMPLACE_PAR_TON_TOKEN_ICI      # <- colle ton token ici
-api_url: https://cybersafe-ai-production.up.railway.app/api
+api_url: https://app.cybersafe-ai.com/api
 ```
 
 - `token` : le token recupere a l'etape 0.
