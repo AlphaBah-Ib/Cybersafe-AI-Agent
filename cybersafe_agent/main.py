@@ -33,6 +33,7 @@ from cybersafe_agent.port_inventory import build_port_inventory_event
 from pathlib import Path
 from typing import Optional
 
+from cybersafe_agent import __version__
 from cybersafe_agent.buffer import EventBuffer
 from cybersafe_agent.config import AgentConfig, load_config
 from cybersafe_agent.parser import line_to_event
@@ -328,7 +329,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version="cybersafe-agent 1.1.0",
+        version=f"cybersafe-agent {__version__}",
     )
     return parser
 

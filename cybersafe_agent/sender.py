@@ -20,6 +20,7 @@ from typing import List, Optional
 
 import requests
 
+from . import __version__
 from .spool import EventSpool
 
 
@@ -65,7 +66,7 @@ class EventSender:
         self.session.headers.update({
             "X-Agent-Token": token,
             "Content-Type": "application/json",
-            "User-Agent": "Cybersafe-Agent/1.0",
+            "User-Agent": f"Cybersafe-Agent/{__version__}",
         })
 
     # ── API publique ─────────────────────────────────────────────────────
