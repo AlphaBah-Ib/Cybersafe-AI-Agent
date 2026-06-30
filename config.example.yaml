@@ -73,8 +73,8 @@ sources:
   # tentatives repetees. Active la journalisation firewall au prealable :
   #   ufw logging on        (ufw -> /var/log/ufw.log)
   #   ou iptables -A ... -j LOG  (-> /var/log/kern.log)
-  # - path: /var/log/ufw.log
-  #   type: firewall
+  - path: /var/log/ufw.log
+    type: firewall
   # - path: /var/log/kern.log              # iptables/nftables via kernel log
   #   type: firewall
   # iis_access fonctionne aussi sur Linux si tu recois des logs W3C via un

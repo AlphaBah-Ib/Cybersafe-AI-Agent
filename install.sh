@@ -244,6 +244,19 @@ if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
         sed -i "s|^log_file:.*|log_file: ${AGENT_LOG_FILE}|" "${CONFIG_DIR}/config.yaml"
 
         log_ok "Default config installed (review token before starting the service)."
+
+        # --- Firewall logging (SOC-PORTS) -------------------------------
+        # The firewall source (/var/log/ufw.log) is enabled by default in the
+        # config. Enable ufw logging so the file exists and collection starts
+        # immediately. Best-effort: only if ufw is present AND active.
+        # On hosts without ufw, the tailer waits gracefully for the file.
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+            log_info "ufw detected and active; enabling firewall logging (ufw logging on)..."
+            ufw logging on >/dev/null 2>&1 || log_warn "Could not enable ufw logging (continuing)."
+            log_ok "ufw logging enabled (firewall events will be collected)."
+        else
+            log_info "ufw not active; firewall source stays armed and will collect once a firewall log exists."
+        fi
     else
         log_warn "config.example.yaml not found; skipping config install."
         log_warn "You will need to create ${CONFIG_DIR}/config.yaml manually."
