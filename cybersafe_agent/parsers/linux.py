@@ -45,6 +45,19 @@ def detect_severity_and_type(line: str) -> Tuple[str, str]:
     if "invalid user" in lower:
         return ("high", "invalid_user")
 
+    # SOC-AUTH : tentatives SSH avortees avant authentification (scan /
+    # brute-force). Individuellement medium ; l'agregation backend par IP
+    # source en fait un finding de brute-force si le volume le justifie.
+    if "[preauth]" in lower and (
+        "connection closed by authenticating user" in lower
+        or "disconnected from authenticating user" in lower
+        or "received disconnect from" in lower
+    ):
+        return ("medium", "ssh_preauth_disconnect")
+    # pam_unix signale une tentative sur un utilisateur inexistant.
+    if "pam_unix(sshd:auth)" in lower and "user unknown" in lower:
+        return ("high", "invalid_user")
+
     # Connexions réussies (sévérité moyenne — à monitorer)
     if "accepted password" in lower or "accepted publickey" in lower:
         return ("medium", "ssh_login_success")
