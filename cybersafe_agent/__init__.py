@@ -8,5 +8,5 @@ Usage:
     python -m cybersafe_agent
 """
 
-__version__ = "1.1.0"
+__version__ = "1.7.0"
 __all__ = []
