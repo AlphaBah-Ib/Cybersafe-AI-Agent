@@ -124,6 +124,8 @@ class AgentConfig:
     # ── Inventaire des ports (SOC-PORTS) ─────────────────────────────────
     port_scan_enabled: bool = True
     port_scan_interval: float = 21600.0  # 6h
+    remediation_enabled: bool = True
+    remediation_poll_interval: float = 60.0
 
     # ── Retry réseau ─────────────────────────────────────────────────────
     retry_max_attempts: int = 6
@@ -227,6 +229,8 @@ def load_config(path: str = None) -> AgentConfig:
         tail_poll_interval=float(raw.get("tail_poll_interval", 1.0)),
         port_scan_enabled=bool(raw.get("port_scan_enabled", True)),
         port_scan_interval=float(raw.get("port_scan_interval", 21600.0)),
+        remediation_enabled=bool(raw.get("remediation_enabled", True)),
+        remediation_poll_interval=float(raw.get("remediation_poll_interval", 60.0)),
         retry_max_attempts=int(raw.get("retry_max_attempts", 6)),
         retry_base_delay=float(raw.get("retry_base_delay", 1.0)),
         retry_max_delay=float(raw.get("retry_max_delay", 60.0)),
