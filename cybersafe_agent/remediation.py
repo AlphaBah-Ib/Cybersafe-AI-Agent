@@ -1,23 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-SOC-RESPONSE (agent) — recuperation et execution des ordres de remediation.
+SOC-RESPONSE — service de remediation (execution des ordres ban/unban IP).
 
-Canal DESCENDANT : l'agent interroge periodiquement le backend pour ses ordres
-'pending', les execute localement (ufw / iptables), puis remonte le resultat.
+Architecture (Option A) : ce module tourne dans un SERVICE SYSTEMD SEPARE
+(cybersafe-remediation), distinct de l'agent de collecte. Ce service dispose
+de la capability CAP_NET_ADMIN (accordee par systemd), ce qui lui permet
+d'appeler ufw/iptables DIRECTEMENT, sans sudo. L'agent principal reste
+totalement passif et durci (aucun privilege).
 
-GARDE-FOUS cote agent (en plus de l'allowlist backend) :
+Canal DESCENDANT : le service interroge periodiquement le backend pour ses
+ordres 'pending', les execute localement, puis remonte le resultat.
+
+GARDE-FOUS cote service (en plus de l'allowlist backend) :
   - anti-lockout : ne JAMAIS bannir une IP ayant une session SSH active locale ;
-  - execution via sudo d'une commande PRECISE (pas de shell, pas de root complet) ;
-  - ban temporaire : delegue a la commande (ufw ne gere pas le TTL nativement ->
-    on trace le ttl et un nettoyage ulterieur pourra deban ; Phase 1 = ban simple).
-
-A placer dans cybersafe_agent/remediation.py
+  - commande PRECISE (liste d'arguments, jamais de shell) ;
+  - privilege minimal : CAP_NET_ADMIN uniquement (pas root complet, pas de sudo).
 """
 import logging
 import shutil
 import subprocess
 import threading
-import time
 
 import requests
 
@@ -41,7 +43,6 @@ def _active_ssh_source_ips():
     l'allowlist backend reste le garde-fou principal).
     """
     ips = set()
-    # 'who' montre les utilisateurs connectes avec leur origine entre parentheses.
     try:
         out = subprocess.run(["who"], capture_output=True, text=True, timeout=5)
         for line in out.stdout.splitlines():
@@ -56,10 +57,13 @@ def _active_ssh_source_ips():
 
 
 def _detect_firewall():
-    """Retourne 'ufw' si dispo et actif, sinon 'iptables' si present, sinon None."""
+    """
+    Retourne 'ufw' si dispo et actif, sinon 'iptables' si present, sinon None.
+    Appel direct (le service a CAP_NET_ADMIN, pas besoin de sudo).
+    """
     if shutil.which("ufw"):
         try:
-            out = subprocess.run(["sudo", "-n", "ufw", "status"],
+            out = subprocess.run(["ufw", "status"],
                                  capture_output=True, text=True, timeout=5)
             if "active" in out.stdout.lower() or "actif" in out.stdout.lower():
                 return "ufw"
@@ -72,13 +76,13 @@ def _detect_firewall():
 
 def _apply_ban(ip, fw):
     """
-    Execute le ban via sudo (commande precise, pas de shell).
+    Execute le ban (commande precise, pas de shell, pas de sudo).
     Retourne (success: bool, detail: str).
     """
     if fw == "ufw":
-        cmd = ["sudo", "-n", "ufw", "deny", "from", ip]
+        cmd = ["ufw", "deny", "from", ip]
     elif fw == "iptables":
-        cmd = ["sudo", "-n", "iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"]
+        cmd = ["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"]
     else:
         return False, "aucun firewall (ufw/iptables) detecte"
     try:
@@ -92,9 +96,9 @@ def _apply_ban(ip, fw):
 
 def _apply_unban(ip, fw):
     if fw == "ufw":
-        cmd = ["sudo", "-n", "ufw", "delete", "deny", "from", ip]
+        cmd = ["ufw", "delete", "deny", "from", ip]
     elif fw == "iptables":
-        cmd = ["sudo", "-n", "iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"]
+        cmd = ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"]
     else:
         return False, "aucun firewall detecte"
     try:
@@ -174,7 +178,7 @@ def _poll_once(api_url, token):
 
 def remediation_loop(config, stop_event):
     """
-    Thread : interroge le backend toutes les `remediation_poll_interval` secondes.
+    Boucle : interroge le backend toutes les `remediation_poll_interval` secondes.
     S'arrete proprement quand stop_event est arme.
     """
     interval = getattr(config, "remediation_poll_interval", 60.0)

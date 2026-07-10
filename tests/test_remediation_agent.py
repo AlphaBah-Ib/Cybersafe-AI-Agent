@@ -76,7 +76,7 @@ def test_apply_ban_ufw_builds_correct_command():
         ok, detail = R._apply_ban("1.2.3.4", "ufw")
     assert ok is True
     called = m.call_args[0][0]
-    assert called == ["sudo", "-n", "ufw", "deny", "from", "1.2.3.4"]
+    assert called == ["ufw", "deny", "from", "1.2.3.4"]
 
 
 def test_apply_ban_no_firewall():

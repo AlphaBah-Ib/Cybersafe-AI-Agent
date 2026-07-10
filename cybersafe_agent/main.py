@@ -27,7 +27,6 @@ import os
 import signal
 import sys
 import threading
-from .remediation import remediation_loop
 import time
 
 from cybersafe_agent.port_inventory import build_port_inventory_event
@@ -268,17 +267,6 @@ def run(stop_event: Optional[threading.Event] = None, config_path: Optional[str]
         logger.info(
             "[port-inventory] active (intervalle %ss)", config.port_scan_interval
         )
-
-    # ── 6c. Thread de remediation (SOC-RESPONSE) ─────────────────────────
-    remediation_thread = None
-    if getattr(config, "remediation_enabled", True):
-        remediation_thread = threading.Thread(
-            target=remediation_loop,
-            args=(config, stop_event),
-            name="remediation",
-            daemon=True,
-        )
-        remediation_thread.start()
 
     logger.info("Surveillance active. Ctrl+C pour quitter (ou stop via SCM).")
 
