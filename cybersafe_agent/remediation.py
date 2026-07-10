@@ -58,17 +58,14 @@ def _active_ssh_source_ips():
 
 def _detect_firewall():
     """
-    Retourne 'ufw' si dispo et actif, sinon 'iptables' si present, sinon None.
-    Appel direct (le service a CAP_NET_ADMIN, pas besoin de sudo).
+    Retourne 'iptables' si present, sinon None.
+
+    Le service tourne en non-root avec CAP_NET_ADMIN. iptables respecte cette
+    capability ; ufw NON (il exige UID 0 : "You need to be root to run this
+    script"). On utilise donc iptables directement comme moteur. Les regles
+    inserees en tete de chaine INPUT (-I) restent effectives meme si ufw gere
+    par ailleurs le firewall (ufw s'appuie lui-meme sur iptables/netfilter).
     """
-    if shutil.which("ufw"):
-        try:
-            out = subprocess.run(["ufw", "status"],
-                                 capture_output=True, text=True, timeout=5)
-            if "active" in out.stdout.lower() or "actif" in out.stdout.lower():
-                return "ufw"
-        except Exception:  # noqa: BLE001
-            pass
     if shutil.which("iptables"):
         return "iptables"
     return None
