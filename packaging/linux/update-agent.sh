@@ -168,8 +168,12 @@ info "Redemarrage du service ${SERVICE_NAME}..."
 systemctl restart "${SERVICE_NAME}"
 sleep 3
 if systemctl list-unit-files | grep -q cybersafe-remediation.service; then
-  info "Redemarrage du service de remediation..."
-  systemctl restart cybersafe-remediation.service || warn "remediation restart KO (non bloquant)."
+  info "Activation + demarrage du service de remediation..."
+  # enable --now : idempotent (active au boot ET demarre maintenant, que le
+  # service tourne deja ou non). Robuste au 1er deploiement.
+  systemctl enable --now cybersafe-remediation.service 2>/dev/null \
+    || systemctl restart cybersafe-remediation.service \
+    || warn "remediation start KO (non bloquant)."
 fi
 if systemctl is-active --quiet "${SERVICE_NAME}"; then
   ok "Agent redemarre et actif sur la version ${VERSION}."
