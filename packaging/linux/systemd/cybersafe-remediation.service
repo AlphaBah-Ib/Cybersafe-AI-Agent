@@ -1,0 +1,61 @@
+[Unit]
+Description=Cybersafe-AI Remediation - firewall ban/unban executor (SOC-RESPONSE)
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cybersafe
+Group=cybersafe
+WorkingDirectory=/opt/cybersafe-agent
+EnvironmentFile=-/etc/cybersafe/agent.env
+ExecStart=/opt/cybersafe-agent/venv/bin/python -m cybersafe_agent.remediation_service
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cybersafe-remediation
+
+# --- Privilege minimal : SEULE la capability reseau, pour piloter ufw/iptables ---
+# CAP_NET_ADMIN : configuration reseau (regles firewall).
+# CAP_NET_RAW   : requis par certaines operations iptables.
+# Pas de sudo, pas de root : la capability suffit et rien de plus n'est accorde.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# --- Security hardening (conserve au maximum) ---
+# NoNewPrivileges reste actif : il n'empeche PAS les capabilities ambiantes,
+# il empeche seulement l'escalade via setuid/sudo. Compatible avec notre modele.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+# NB : on garde @system-service mais on NE filtre PAS @privileged ici :
+# ufw/iptables ont besoin d'appels reseau privilegies (couverts par CAP_NET_ADMIN).
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources
+# Chemins accessibles en ecriture (etat minimal ; ufw ecrit dans /etc et /lib)
+ReadWritePaths=/var/lib/cybersafe
+ReadOnlyPaths=/etc/cybersafe
+# Resource limits
+LimitNOFILE=2048
+MemoryMax=128M
+CPUQuota=25%
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

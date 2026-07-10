@@ -301,6 +301,22 @@ log_info "Enabling ${SERVICE_NAME} (start on boot)..."
 systemctl enable "${SERVICE_NAME}.service" >/dev/null
 log_ok "Service enabled."
 
+# --- 6b. Install and enable the remediation service (SOC-RESPONSE) --------
+# Service SEPARE avec CAP_NET_ADMIN pour executer les bans firewall, sans
+# toucher au durcissement de l'agent principal (qui reste sans privilege).
+REMEDIATION_SRC="packaging/linux/systemd/cybersafe-remediation.service"
+REMEDIATION_DST="/etc/systemd/system/cybersafe-remediation.service"
+if [ -f "${REMEDIATION_SRC}" ]; then
+    log_info "Installing remediation unit to ${REMEDIATION_DST}..."
+    install -o root -g root -m 0644 "${REMEDIATION_SRC}" "${REMEDIATION_DST}"
+    systemctl daemon-reload
+    systemctl enable cybersafe-remediation.service >/dev/null
+    systemctl start cybersafe-remediation.service || log_warn "remediation start differe."
+    log_ok "Remediation service installed and enabled."
+else
+    log_warn "Remediation unit absente (${REMEDIATION_SRC}) - remediation non installee."
+fi
+
 # --- Summary --------------------------------------------------------------
 
 echo

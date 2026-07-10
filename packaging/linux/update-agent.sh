@@ -154,9 +154,23 @@ fi
 ok "Verifications passees (syntaxe + import)."
 
 # --- 5. Redemarrage + verification que le service repart -----------------
+# --- Mise a jour du service de remediation (SOC-RESPONSE Option A) --------
+REMEDIATION_UNIT_SRC="${SRC_ROOT}/packaging/linux/systemd/cybersafe-remediation.service"
+REMEDIATION_UNIT_DST="/etc/systemd/system/cybersafe-remediation.service"
+if [ -f "${REMEDIATION_UNIT_SRC}" ]; then
+  info "Mise a jour de l'unite de remediation..."
+  install -o root -g root -m 0644 "${REMEDIATION_UNIT_SRC}" "${REMEDIATION_UNIT_DST}"
+  systemctl daemon-reload
+  systemctl enable cybersafe-remediation.service >/dev/null 2>&1 || true
+fi
+
 info "Redemarrage du service ${SERVICE_NAME}..."
 systemctl restart "${SERVICE_NAME}"
 sleep 3
+if systemctl list-unit-files | grep -q cybersafe-remediation.service; then
+  info "Redemarrage du service de remediation..."
+  systemctl restart cybersafe-remediation.service || warn "remediation restart KO (non bloquant)."
+fi
 if systemctl is-active --quiet "${SERVICE_NAME}"; then
   ok "Agent redemarre et actif sur la version ${VERSION}."
   info "Derniers logs :"
