@@ -3,3 +3,5 @@ PyYAML>=6.0
 
 # Windows agent only (SOC-200 Phase 2) — ignored on Linux/macOS
 pywin32>=305 ; sys_platform == "win32"
+# Auto-update (sous-US 2) : verification de signature Ed25519 des releases
+cryptography>=42.0.0
