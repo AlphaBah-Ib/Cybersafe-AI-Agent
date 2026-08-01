@@ -31,11 +31,13 @@ AGENT_VENV_PY="${AGENT_HOME}/venv/bin/python"
 AGENT_USER="cybersafe"
 AGENT_GROUP="cybersafe"
 SERVICE_NAME="cybersafe-agent"
+CONFIG_FILE="/etc/cybersafe/config.yaml"
 
 TS="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="/root/cybersafe-agent-backup-${TS}"
 TMP_DIR="$(mktemp -d /tmp/cybersafe-update.XXXXXX)"
-ARCHIVE_URL="https://github.com/${REPO}/archive/refs/tags/${VERSION}.tar.gz"
+# ARCHIVE_URL supprime : le telechargement se fait desormais depuis le backend
+# (release signee), plus depuis GitHub public. Voir bloc "Telechargement" ci-dessous.
 
 # Couleurs (lisibilite)
 C_OK="\033[1;32m"; C_INFO="\033[1;34m"; C_WARN="\033[1;33m"; C_ERR="\033[1;31m"; C_RESET="\033[0m"
@@ -64,22 +66,58 @@ fi
 info "Mise a jour de l'agent Cybersafe-AI vers ${VERSION}"
 info "Service : ${SERVICE_NAME} | Code : ${AGENT_CODE_DIR}"
 
-# --- 1. Telechargement de la version cible -------------------------------
-info "Telechargement depuis ${ARCHIVE_URL}"
-if ! curl -fsSL -o "${TMP_DIR}/agent.tar.gz" "${ARCHIVE_URL}"; then
-  err "Echec du telechargement. Verifiez le nom de version (${VERSION}) et la connexion."
+# --- 1. Recuperation des metadonnees de release signee (depuis le backend) --
+REL_VERSION="${VERSION#v}"
+if [ ! -f "${CONFIG_FILE}" ]; then
+  err "Config agent introuvable (${CONFIG_FILE}). L'agent est-il configure ?"
   exit 1
 fi
+AGENT_TOKEN="$("${AGENT_VENV_PY}" -c "from cybersafe_agent.config import load_config; print(load_config('${CONFIG_FILE}').token)")"
+API_URL="$("${AGENT_VENV_PY}" -c "from cybersafe_agent.config import load_config; print(load_config('${CONFIG_FILE}').api_url)")"
+if [ -z "${AGENT_TOKEN}" ] || [ -z "${API_URL}" ]; then
+  err "Token ou api_url absent de ${CONFIG_FILE}."
+  exit 1
+fi
+RELEASE_URL="${API_URL%/}/soc/agents/release/${REL_VERSION}/"
+
+info "Interrogation du backend pour la release ${REL_VERSION}..."
+META="$(curl -fsSL -H "X-Agent-Token: ${AGENT_TOKEN}" "${RELEASE_URL}")" || {
+  err "Echec interrogation ${RELEASE_URL} (release inconnue ou non signee ?)."
+  exit 1
+}
+DOWNLOAD_URL="$(printf '%s' "${META}" | "${AGENT_VENV_PY}" -c "import sys,json;print(json.load(sys.stdin)['download_url'])")"
+EXPECTED_SHA="$(printf '%s' "${META}" | "${AGENT_VENV_PY}" -c "import sys,json;print(json.load(sys.stdin)['sha256'])")"
+SIGNATURE_B64="$(printf '%s' "${META}" | "${AGENT_VENV_PY}" -c "import sys,json;print(json.load(sys.stdin)['signature'])")"
+if [ -z "${DOWNLOAD_URL}" ] || [ -z "${EXPECTED_SHA}" ] || [ -z "${SIGNATURE_B64}" ]; then
+  err "Metadonnees de release incompletes (download_url/sha256/signature)."
+  exit 1
+fi
+
+# --- 1b. Telechargement de l'archive signee (depuis le backend/bucket) -----
+info "Telechargement de l'archive signee depuis ${DOWNLOAD_URL}"
+if ! curl -fsSL -o "${TMP_DIR}/agent.tar.gz" "${DOWNLOAD_URL}"; then
+  err "Echec du telechargement de l'archive."
+  exit 1
+fi
+
+# --- 1c. VERIFICATION DE SIGNATURE (integrite + authenticite) --------------
+info "Verification de la signature de l'archive..."
+if ! "${AGENT_VENV_PY}" -m cybersafe_agent.signing verify \
+       "${TMP_DIR}/agent.tar.gz" "${EXPECTED_SHA}" "${SIGNATURE_B64}"; then
+  err "SIGNATURE INVALIDE — archive rejetee. Aucune mise a jour appliquee."
+  exit 1
+fi
+ok "Signature valide : archive authentique et integre."
+
 info "Extraction..."
 tar xzf "${TMP_DIR}/agent.tar.gz" -C "${TMP_DIR}"
-# Le dossier extrait s'appelle Cybersafe-AI-Agent-<version sans 'v'>
-SRC_ROOT="$(find "${TMP_DIR}" -maxdepth 1 -type d -name 'Cybersafe-AI-Agent-*' | head -1)"
-NEW_CODE_DIR="${SRC_ROOT}/cybersafe_agent"
-if [ ! -d "${NEW_CODE_DIR}" ]; then
+NEW_CODE_DIR="$(find "${TMP_DIR}" -maxdepth 3 -type d -name 'cybersafe_agent' | head -1)"
+if [ -z "${NEW_CODE_DIR}" ] || [ ! -d "${NEW_CODE_DIR}" ]; then
   err "Dossier cybersafe_agent/ absent de l'archive telechargee. Abandon."
   exit 1
 fi
-ok "Code ${VERSION} recupere."
+SRC_ROOT="$(dirname "${NEW_CODE_DIR}")"
+ok "Code ${VERSION} recupere et verifie."
 
 # --- 1bis. Idempotence : deja a jour ? -----------------------------------
 # Compare le contenu du nouveau code avec l'actuel (hash de l'arbre).
