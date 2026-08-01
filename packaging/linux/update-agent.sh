@@ -78,6 +78,18 @@ if [ -z "${AGENT_TOKEN}" ] || [ -z "${API_URL}" ]; then
   err "Token ou api_url absent de ${CONFIG_FILE}."
   exit 1
 fi
+# Version actuellement installee (avant remplacement) -> from_version du rapport.
+CURRENT_VERSION="$("${AGENT_VENV_PY}" -c "import cybersafe_agent; print(cybersafe_agent.__version__)" 2>/dev/null || echo "")"
+
+# Rapport de resultat au backend (sous-US 4). Best-effort : ne bloque jamais.
+report_update(){
+  local result="$1" msg="${2:-}"
+  [ -z "${AGENT_TOKEN:-}" ] && return 0
+  curl -fsS -m 10 -X POST \
+    -H "X-Agent-Token: ${AGENT_TOKEN}" -H "Content-Type: application/json" \
+    -d "{\"from_version\":\"${CURRENT_VERSION}\",\"to_version\":\"${REL_VERSION}\",\"result\":\"${result}\",\"message\":\"${msg}\"}" \
+    "${API_URL%/}/soc/agents/update-report/" >/dev/null 2>&1 || true
+}
 RELEASE_URL="${API_URL%/}/soc/agents/release/${REL_VERSION}/"
 
 info "Interrogation du backend pour la release ${REL_VERSION}..."
@@ -171,6 +183,7 @@ fi
 
 rollback(){
   err "Verification/redemarrage en echec — ROLLBACK vers la version precedente."
+  report_update "failed" "rollback: le nouvel agent n'a pas demarre correctement"
   rm -rf "${AGENT_CODE_DIR}"
   cp -a "${BACKUP_DIR}/cybersafe_agent" "${AGENT_CODE_DIR}"
   chown -R "${AGENT_USER}:${AGENT_GROUP}" "${AGENT_CODE_DIR}"
@@ -215,6 +228,7 @@ if systemctl list-unit-files | grep -q cybersafe-remediation.service; then
 fi
 if systemctl is-active --quiet "${SERVICE_NAME}"; then
   ok "Agent redemarre et actif sur la version ${VERSION}."
+  report_update "success" "mise a jour ${CURRENT_VERSION} -> ${REL_VERSION} appliquee"
   info "Derniers logs :"
   journalctl -u "${SERVICE_NAME}" --no-pager -n 8 || true
   echo ""
