@@ -313,6 +313,25 @@ if [ -f "${REMEDIATION_SRC}" ]; then
     systemctl enable cybersafe-remediation.service >/dev/null
     systemctl start cybersafe-remediation.service || log_warn "remediation start differe."
     log_ok "Remediation service installed and enabled."
+
+# --- 6c. Install and enable the auto-update timer (AGENT auto-update) ------
+# Timer nocturne (+ jitter) qui verifie et applique les mises a jour signees.
+# Le check respecte l'opt-out (auto_update.enabled=false dans config.yaml).
+UPDATE_SVC_SRC="packaging/linux/systemd/cybersafe-update.service"
+UPDATE_TMR_SRC="packaging/linux/systemd/cybersafe-update.timer"
+UPDATE_CHECK_SRC="packaging/linux/auto-update-check.sh"
+if [[ -f "${UPDATE_SVC_SRC}" && -f "${UPDATE_TMR_SRC}" && -f "${UPDATE_CHECK_SRC}" ]]; then
+    log_info "Installing auto-update timer..."
+    # Le script de check est deja dans ${AGENT_HOME}/packaging/... (copie du repo),
+    # on s'assure juste qu'il est executable.
+    chmod +x "${AGENT_HOME}/${UPDATE_CHECK_SRC}" 2>/dev/null || true
+    install -o root -g root -m 0644 "${UPDATE_SVC_SRC}" /etc/systemd/system/cybersafe-update.service
+    install -o root -g root -m 0644 "${UPDATE_TMR_SRC}" /etc/systemd/system/cybersafe-update.timer
+    systemctl daemon-reload
+    systemctl enable --now cybersafe-update.timer >/dev/null 2>&1 \
+        || log_warn "auto-update timer enable differe."
+    log_ok "Auto-update timer installed and enabled (verif nocturne + jitter)."
+fi
 else
     log_warn "Remediation unit absente (${REMEDIATION_SRC}) - remediation non installee."
 fi
