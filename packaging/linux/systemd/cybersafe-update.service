@@ -1,0 +1,19 @@
+[Unit]
+Description=Cybersafe-AI Agent - verification et application des mises a jour
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+After=network-online.target
+Wants=network-online.target
+# Ne tourne que si l'agent est installe.
+ConditionPathExists=/opt/cybersafe-agent/venv/bin/python
+
+[Service]
+Type=oneshot
+# root requis : ecrit dans /opt, redemarre le service agent.
+User=root
+ExecStart=/opt/cybersafe-agent/packaging/linux/auto-update-check.sh
+# Le check est idempotent et sort proprement si rien a faire.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cybersafe-update
+# Garde-fous ressources (le check est leger).
+TimeoutStartSec=600

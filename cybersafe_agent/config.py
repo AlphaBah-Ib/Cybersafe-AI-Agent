@@ -150,6 +150,12 @@ class AgentConfig:
     # Default cross-OS via factory (vide sur Linux, C:\\ProgramData\\... sur Windows).
     windows_bookmarks_dir: str = field(default_factory=_default_bookmarks_dir)
 
+    # ── Auto-update (opt-out) ────────────────────────────────────────────
+    # Active par defaut. Un client fige sa version avec, dans config.yaml :
+    #   auto_update:
+    #     enabled: false
+    auto_update_enabled: bool = True
+
     @property
     def ingest_url(self) -> str:
         """URL complète de l'endpoint d'ingestion."""
@@ -210,6 +216,7 @@ def load_config(path: str = None) -> AgentConfig:
     buffer_cfg = raw.get("buffer", {}) or {}
     windows_cfg = raw.get("windows", {}) or {}
     spool_cfg = raw.get("spool", {}) or {}
+    auto_update_cfg = raw.get("auto_update", {}) or {}
 
     # Defaults cross-OS pour les paths non spécifiés dans le YAML
     os_defaults = get_default_paths()
@@ -240,4 +247,5 @@ def load_config(path: str = None) -> AgentConfig:
         windows_channels=[str(c).strip() for c in (windows_cfg.get("channels") or []) if str(c).strip()],
         windows_security_event_ids=[int(eid) for eid in (windows_cfg.get("security_event_ids") or []) if str(eid).strip().isdigit()],
         windows_bookmarks_dir=str(windows_cfg.get("bookmarks_dir", os_defaults["bookmarks_dir"])).strip(),
+        auto_update_enabled=bool(auto_update_cfg.get("enabled", True)),
     )

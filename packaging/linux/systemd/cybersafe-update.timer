@@ -1,0 +1,15 @@
+[Unit]
+Description=Cybersafe-AI Agent - declencheur nocturne des mises a jour
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+
+[Timer]
+# Fenetre nocturne : chaque agent se declenche entre 02h00 et 05h00, au hasard.
+# Le jitter (RandomizedDelaySec) etale la flotte -> pas de pic de charge backend,
+# et un deploiement progressif qui limite l'impact d'une mauvaise release.
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=3h
+# Rattrape si la machine etait eteinte a l'heure prevue.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
