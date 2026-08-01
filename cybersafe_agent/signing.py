@@ -14,6 +14,7 @@ Les deux doivent passer ; sinon la release est REJETEE (aucune execution).
 """
 import base64
 import hashlib
+import pathlib
 
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.exceptions import InvalidSignature
@@ -67,3 +68,36 @@ def verify_release(archive_bytes: bytes, expected_sha256: str, signature_b64: st
         raise SignatureError("Authenticite : signature invalide (release non fiable).")
 
     return actual
+
+
+def _cli(argv=None):
+    """Point d'entree CLI pour update-agent.sh :
+        python -m cybersafe_agent.signing verify <archive> <sha256> <signature_b64>
+    Sortie : 0 si la release est valide, 2 si rejetee, 1 si mauvais usage.
+    Aucune execution du code de l'archive : validation seule.
+    """
+    import sys as _sys
+    argv = argv if argv is not None else _sys.argv[1:]
+    if len(argv) != 4 or argv[0] != "verify":
+        _sys.stderr.write(
+            "usage: python -m cybersafe_agent.signing verify "
+            "<archive> <sha256> <signature_b64>\n")
+        return 1
+    _, archive_path, expected_sha256, signature_b64 = argv
+    try:
+        data = pathlib.Path(archive_path).read_bytes()
+    except OSError as exc:
+        _sys.stderr.write(f"Archive illisible : {exc}\n")
+        return 1
+    try:
+        verify_release(data, expected_sha256, signature_b64)
+    except SignatureError as exc:
+        _sys.stderr.write(f"REJETEE : {exc}\n")
+        return 2
+    _sys.stdout.write("OK : release verifiee (integrite + authenticite).\n")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(_cli())
