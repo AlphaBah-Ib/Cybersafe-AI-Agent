@@ -21,6 +21,22 @@ from typing import List, Optional
 import requests
 
 from . import __version__
+
+
+def _parse_version(v):
+    """Parse '1.10.3' (ou 'v1.10.3') -> (1, 10, 3). None si non parsable."""
+    try:
+        return tuple(int(x) for x in str(v).strip().lstrip("v").split("."))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _is_newer(latest, current):
+    """True si latest > current (comparaison semantique par tuple, pas string)."""
+    lv, cv = _parse_version(latest), _parse_version(current)
+    if lv is None or cv is None:
+        return False
+    return lv > cv
 from .spool import EventSpool
 
 
@@ -208,6 +224,16 @@ class EventSender:
                             f"✅ Batch sent: {data.get('ingested', 0)} ingested, "
                             f"{data.get('duplicates', 0)} duplicates"
                         )
+                        # AGENT auto-update (sous-US 1) : le backend signale la
+                        # derniere version dispo. On INFORME seulement (aucun
+                        # telechargement/execution : sous-US 2 et 3).
+                        _latest = data.get("latest_version")
+                        if _latest and _is_newer(_latest, __version__):
+                            logger.info(
+                                f"🔄 Nouvelle version {_latest} disponible "
+                                f"(version actuelle: {__version__}). "
+                                f"Mise a jour automatique non encore active."
+                            )
                     except ValueError:
                         logger.info(f"✅ Batch sent ({len(events)} events)")
                     return "ok"
