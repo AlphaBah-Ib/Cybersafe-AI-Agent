@@ -16,6 +16,9 @@ set -euo pipefail
 
 AGENT_HOME="/opt/cybersafe-agent"
 AGENT_VENV_PY="${AGENT_HOME}/venv/bin/python"
+# Le module cybersafe_agent est pose dans AGENT_HOME (pas installe en package) :
+# on l'expose via PYTHONPATH pour tous les appels Python ci-dessous.
+export PYTHONPATH="${AGENT_HOME}${PYTHONPATH:+:${PYTHONPATH}}"
 CONFIG_FILE="/etc/cybersafe/config.yaml"
 UPDATE_SCRIPT="$(dirname "$(readlink -f "$0")")/update-agent.sh"
 

@@ -28,6 +28,9 @@ REPO="AlphaBah-Ib/Cybersafe-AI-Agent"
 AGENT_HOME="/opt/cybersafe-agent"
 AGENT_CODE_DIR="${AGENT_HOME}/cybersafe_agent"
 AGENT_VENV_PY="${AGENT_HOME}/venv/bin/python"
+# Le module cybersafe_agent est pose dans AGENT_HOME (pas installe en package) :
+# on l'expose via PYTHONPATH pour tous les appels Python (config, signing, ...).
+export PYTHONPATH="${AGENT_HOME}${PYTHONPATH:+:${PYTHONPATH}}"
 AGENT_USER="cybersafe"
 AGENT_GROUP="cybersafe"
 SERVICE_NAME="cybersafe-agent"

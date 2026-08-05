@@ -210,6 +210,13 @@ else
     cp requirements.txt "${AGENT_HOME}/requirements.txt"
 fi
 
+# packaging/ : scripts d'auto-update (auto-update-check.sh, update-agent.sh) et
+# units systemd. Le timer d'auto-update (bloc 6c) pointe vers ces scripts sous
+# ${AGENT_HOME}/packaging/, il FAUT donc les copier ici (sinon le timer echoue).
+rm -rf "${AGENT_HOME}/packaging"
+cp -r packaging "${AGENT_HOME}/packaging"
+chmod +x "${AGENT_HOME}/packaging/linux/"*.sh 2>/dev/null || true
+
 chown -R "${AGENT_USER}:${AGENT_GROUP}" "${AGENT_HOME}"
 log_ok "Agent code installed."
 
