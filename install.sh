@@ -302,6 +302,9 @@ install -o root -g root -m 0644 "${SERVICE_FILE_SRC}" "${SERVICE_FILE_DST}"
 log_ok "Service file installed."
 
 log_info "Reloading systemd..."
+if ! command -v iptables >/dev/null 2>&1; then
+    log_warn "iptables absent : le blocage d'IP ne fonctionnera pas. Debian/Ubuntu : apt-get install -y iptables"
+fi
 systemctl daemon-reload
 
 log_info "Enabling ${SERVICE_NAME} (start on boot)..."
@@ -357,7 +360,7 @@ echo "       sudo nano ${CONFIG_DIR}/config.yaml"
 echo "     (replace 'csa_REMPLACE_PAR_TON_TOKEN_ICI' with your real token)"
 echo
 echo "  2. Start the agent:"
-echo "       sudo systemctl start ${SERVICE_NAME}"
+echo "       sudo systemctl restart ${SERVICE_NAME} cybersafe-remediation"
 echo
 echo "  3. Check status and logs:"
 echo "       systemctl status ${SERVICE_NAME}"
