@@ -217,7 +217,8 @@ rm -rf "${AGENT_HOME}/packaging"
 cp -r packaging "${AGENT_HOME}/packaging"
 chmod +x "${AGENT_HOME}/packaging/linux/"*.sh 2>/dev/null || true
 
-chown -R "${AGENT_USER}:${AGENT_GROUP}" "${AGENT_HOME}"
+chown -R root:root "${AGENT_HOME}"
+chmod -R u+rwX,go+rX,go-w "${AGENT_HOME}"
 log_ok "Agent code installed."
 
 # --- 4. Create / update the virtualenv ------------------------------------
@@ -233,7 +234,7 @@ fi
 log_info "Installing Python dependencies..."
 "${AGENT_HOME}/venv/bin/pip" install --quiet --upgrade pip
 "${AGENT_HOME}/venv/bin/pip" install --quiet -r "${AGENT_HOME}/requirements.txt"
-chown -R "${AGENT_USER}:${AGENT_GROUP}" "${AGENT_HOME}/venv"
+chown -R root:root "${AGENT_HOME}/venv"
 log_ok "Dependencies installed."
 
 # --- 5. Configuration files -----------------------------------------------

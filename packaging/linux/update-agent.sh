@@ -154,7 +154,7 @@ info "Remplacement du code de l'agent..."
 # Remplace le contenu du dossier cybersafe_agent/ par la nouvelle version.
 rm -rf "${AGENT_CODE_DIR}"
 cp -a "${NEW_CODE_DIR}" "${AGENT_CODE_DIR}"
-chown -R "${AGENT_USER}:${AGENT_GROUP}" "${AGENT_CODE_DIR}"
+chown -R root:root "${AGENT_CODE_DIR}"
 ok "Code remplace, permissions remises a ${AGENT_USER}:${AGENT_GROUP}."
 
 # --- 4. Verification AVANT redemarrage (ne pas casser un agent OK) --------
@@ -189,7 +189,7 @@ rollback(){
   report_update "failed" "rollback: le nouvel agent n'a pas demarre correctement"
   rm -rf "${AGENT_CODE_DIR}"
   cp -a "${BACKUP_DIR}/cybersafe_agent" "${AGENT_CODE_DIR}"
-  chown -R "${AGENT_USER}:${AGENT_GROUP}" "${AGENT_CODE_DIR}"
+  chown -R root:root "${AGENT_CODE_DIR}"
   systemctl restart "${SERVICE_NAME}" || true
   sleep 2
   if systemctl is-active --quiet "${SERVICE_NAME}"; then
@@ -209,6 +209,24 @@ ok "Verifications passees (syntaxe + import)."
 
 # --- 5. Redemarrage + verification que le service repart -----------------
 # --- Mise a jour du service de remediation (SOC-RESPONSE Option A) --------
+# Durcissement : l'installation appartient a root et n'est pas modifiable par
+# l'utilisateur de l'agent (elle est executee en root par la mise a jour ; l'agent
+# n'ecrit que dans /var/lib/cybersafe et /var/spool/cybersafe).
+chown -R root:root "${AGENT_HOME}"
+chmod -R u+rwX,go+rX,go-w "${AGENT_HOME}"
+
+# Rafraichit aussi les scripts de mise a jour installes : sans cela, un correctif
+# de ces scripts ne serait jamais applique (seul cybersafe_agent/ etait remplace).
+# root:root 0755 (executes en root : l'utilisateur cybersafe ne doit pas pouvoir
+# les modifier) ; « install » cree un nouveau fichier, sans abimer ce script en cours.
+if [ -d "${SRC_ROOT}/packaging/linux" ]; then
+  install -d -o root -g root -m 0755 "${AGENT_HOME}/packaging/linux"
+  for f in "${SRC_ROOT}"/packaging/linux/*.sh; do
+    install -o root -g root -m 0755 "$f" "${AGENT_HOME}/packaging/linux/" \
+      || warn "script $(basename "$f") non rafraichi (non bloquant)."
+  done
+fi
+
 REMEDIATION_UNIT_SRC="${SRC_ROOT}/packaging/linux/systemd/cybersafe-remediation.service"
 REMEDIATION_UNIT_DST="/etc/systemd/system/cybersafe-remediation.service"
 if [ -f "${REMEDIATION_UNIT_SRC}" ]; then
