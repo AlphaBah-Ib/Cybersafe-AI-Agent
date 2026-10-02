@@ -225,8 +225,10 @@ if systemctl list-unit-files | grep -q cybersafe-remediation.service; then
   info "Activation + demarrage du service de remediation..."
   # enable --now : idempotent (active au boot ET demarre maintenant, que le
   # service tourne deja ou non). Robuste au 1er deploiement.
-  systemctl enable --now cybersafe-remediation.service 2>/dev/null \
-    || systemctl restart cybersafe-remediation.service \
+  # enable --now ne redemarre PAS un service deja actif : l'ancien code resterait
+  # en memoire. On active, puis on REDEMARRE toujours.
+  systemctl enable cybersafe-remediation.service >/dev/null 2>&1 || true
+  systemctl restart cybersafe-remediation.service \
     || warn "remediation start KO (non bloquant)."
 fi
 if systemctl is-active --quiet "${SERVICE_NAME}"; then
