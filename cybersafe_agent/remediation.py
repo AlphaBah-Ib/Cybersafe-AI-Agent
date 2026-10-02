@@ -105,11 +105,37 @@ def _apply_unban(ip, fw):
         return False, "exception: %s" % exc
 
 
-def _report(api_url, token, order_id, success, detail):
+def _rule_present(ip, fw):
+    """
+    v1.8.1 : constat apres un ban - la regle de blocage est-elle en place ?
+    `iptables -C` est une verification en LECTURE SEULE (meme privilege que le
+    ban). Retourne True (rc 0), False (rc 1 : regle absente), ou None si le
+    constat est impossible (autre moteur, erreur, permission) : le serveur ne
+    change alors rien.
+    """
+    if fw != "iptables":
+        return None
+    try:
+        r = subprocess.run(["iptables", "-C", "INPUT", "-s", ip, "-j", "DROP"],
+                           capture_output=True, text=True, timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[remediation] constat KO pour %s: %s", ip, exc)
+        return None
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    return None
+
+
+def _report(api_url, token, order_id, success, detail, rule_present=None):
+    payload = {"success": success, "detail": detail}
+    if rule_present is not None:
+        payload["rule_present"] = rule_present  # lu par le serveur (v1.8.1+)
     try:
         requests.post(
             _result_url(api_url, order_id),
-            json={"success": success, "detail": detail},
+            json=payload,
             headers={"X-Agent-Token": token,
                      "User-Agent": "Cybersafe-Agent/remediation"},
             timeout=_HTTP_TIMEOUT,
@@ -146,10 +172,14 @@ def _process_order(order, api_url, token):
     else:
         ok, detail = False, "action inconnue: %s" % action
 
+    # v1.8.1 : apres un ban reussi, constat de la regle (lecture seule).
+    rule = _rule_present(ip, fw) if (ok and action == "ban_ip") else None
+    if rule is False:
+        logger.warning("[remediation] order=%s regle absente apres le ban de %s", oid, ip)
     level = logging.INFO if ok else logging.WARNING
     logger.log(level, "[remediation] order=%s %s %s -> %s (%s)",
                oid, action, ip, "OK" if ok else "FAIL", detail)
-    _report(api_url, token, oid, ok, detail)
+    _report(api_url, token, oid, ok, detail, rule_present=rule)
 
 
 def _poll_once(api_url, token):
