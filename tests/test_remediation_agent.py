@@ -95,3 +95,13 @@ def test_poll_once_handles_non_200():
 def test_orders_url_and_result_url():
     assert R._orders_url("https://app.test/api/") == "https://app.test/api/soc/agents/orders/"
     assert R._result_url("https://app.test/api", 7) == "https://app.test/api/soc/agents/orders/7/result/"
+
+
+# [R11-GUARD-BYPASS] Ces tests portent sur l'execution des ordres, pas sur leur
+# signature (couverte par tests/test_order_guard.py) : controle neutralise ici.
+import pytest as _pytest_r11  # noqa: E402
+
+
+@_pytest_r11.fixture(autouse=True)
+def _r11_guard_bypass(monkeypatch):
+    monkeypatch.setattr("cybersafe_agent.remediation._guard_order", lambda order: None)

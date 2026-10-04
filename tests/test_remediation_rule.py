@@ -9,6 +9,18 @@ from unittest import mock
 
 from cybersafe_agent import remediation as r
 
+# [R11-GUARD-BYPASS] Ces tests portent sur l'execution des ordres, pas sur leur
+# signature (couverte par tests/test_order_guard.py) : controle neutralise ici.
+_R11_GUARD = mock.patch.object(r, "_guard_order", return_value=None)
+
+
+def setUpModule():
+    _R11_GUARD.start()
+
+
+def tearDownModule():
+    _R11_GUARD.stop()
+
 IP = "1.2.3.4"
 
 

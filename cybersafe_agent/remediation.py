@@ -20,8 +20,13 @@ import logging
 import shutil
 import subprocess
 import threading
+from urllib.parse import urlparse
 
 import requests
+
+# [R11-IMPORTS]
+from .order_guard import OrderRejected, ReplayJournal, guard_order
+from .paths import get_state_dir
 
 logger = logging.getLogger("cybersafe.remediation")
 
@@ -144,11 +149,55 @@ def _report(api_url, token, order_id, success, detail, rule_present=None):
         logger.warning("[remediation] report KO order=%s: %s", order_id, exc)
 
 
+# [R11-HELPERS] US-SOC-R11 — controle des ordres et du canal.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_journal = None
+_journal_lock = threading.Lock()
+
+
+def _get_journal():
+    global _journal
+    with _journal_lock:
+        if _journal is None:
+            _journal = ReplayJournal(get_state_dir())
+        return _journal
+
+
+def _guard_order(order):
+    """None si l'ordre peut etre execute, sinon le motif du refus."""
+    try:
+        guard_order(order, _get_journal())
+    except OrderRejected as exc:
+        return str(exc)
+    return None
+
+
+def _api_url_is_secure(api_url):
+    """https:// exige, sauf http:// vers la machine locale (developpement)."""
+    try:
+        parsed = urlparse(api_url or "")
+        host = parsed.hostname
+    except ValueError:
+        return False
+    if parsed.scheme == "https":
+        return True
+    return parsed.scheme == "http" and host in _LOCAL_HOSTS
+
+
 def _process_order(order, api_url, token):
     """Traite un ordre. Applique les garde-fous, execute, rapporte."""
     oid = order.get("id")
     action = order.get("action")
     ip = (order.get("target_ip") or "").strip()
+
+    # [R11-PROCESS-GUARD] signature, expiration, usage unique, action, IP : AVANT tout.
+    refus = _guard_order(order)
+    if refus:
+        logger.warning("[AUDIT] [remediation] ordre REFUSE order=%r action=%r ip=%r : %s",
+                       oid, action, ip, refus)
+        if oid is not None:
+            _report(api_url, token, oid, False, ("R11 refus agent: %s" % refus)[:250])
+        return
 
     if not ip:
         _report(api_url, token, oid, False, "target_ip vide")
@@ -211,6 +260,13 @@ def remediation_loop(config, stop_event):
     interval = getattr(config, "remediation_poll_interval", 60.0)
     api_url = config.api_url
     token = config.token
+    # [R11-HTTPS-LOOP] jamais d'ordres de pare-feu sur un canal non chiffre.
+    if not _api_url_is_secure(api_url):
+        logger.error("[AUDIT] [remediation] api_url non HTTPS (%r) : remediation NON "
+                     "demarree. Corriger api_url dans la configuration puis redemarrer "
+                     "cybersafe-remediation.", api_url)
+        stop_event.wait()  # pas de boucle de redemarrage systemd
+        return
     logger.info("[remediation] active (intervalle %ss)", interval)
     while not stop_event.is_set():
         _poll_once(api_url, token)

@@ -76,6 +76,21 @@ def get_default_paths() -> Dict[str, str]:
     }
 
 
+# [R11-STATE-DIR] Dossier d'etat persistant des services (journal anti-rejeu).
+_LINUX_STATE_DIR = Path("/var/lib/cybersafe")
+
+
+def get_state_dir() -> str:
+    """
+    Dossier d'etat persistant (US-SOC-R11 : journal anti-rejeu des ordres).
+    Linux : /var/lib/cybersafe, deja dans ReadWritePaths des unites systemd.
+    Non cree ici : l'appelant s'en charge.
+    """
+    if platform.system() == "Windows":
+        return str(_WINDOWS_DATA_ROOT / "state")
+    return str(_LINUX_STATE_DIR)
+
+
 def is_windows() -> bool:
     """Return True if running on Windows. Single source of truth for OS check."""
     return platform.system() == "Windows"
