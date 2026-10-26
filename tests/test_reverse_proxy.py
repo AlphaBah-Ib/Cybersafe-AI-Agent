@@ -122,6 +122,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(pa, "CONF_DIR", str(conf_dir))
     monkeypatch.setattr(pa, "STATUS_DIR", str(tmp_path / "status"))
     monkeypatch.setattr(pa, "DESIRED", str(state / "desired.json"))
+    monkeypatch.setattr(pa, "ENFORCE_DIR", str(tmp_path / "cybersafe"))  # [R12-P4B] absent
     monkeypatch.setattr(pa, "_nginx_bin", lambda: "/usr/sbin/nginx")
     fake = FakeNginx(str(conf_dir / pa.CONF_NAME))
     monkeypatch.setattr(pa, "_run", fake)

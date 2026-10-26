@@ -44,6 +44,10 @@ install -d -o cybersafe -g cybersafe -m 0750 /var/lib/cybersafe
 install -d -o cybersafe -g cybersafe -m 0750 /var/lib/cybersafe/proxy
 # Statut : ecrit par root uniquement (aucun lien symbolique possible par l'agent).
 install -d -o root -g root -m 0755 /var/lib/cybersafe-proxy
+# [R12-P4B] enforce.conf (regles WAF et pays), ecrit par l'unite root si nginx est present.
+if [ -d /etc/nginx ]; then
+  install -d -o root -g root -m 0755 /etc/nginx/cybersafe
+fi
 
 # --- Unites ---------------------------------------------------------------------
 PROXY_SERVICE="$(cat <<'EOF'
@@ -67,7 +71,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=-/etc/nginx/conf.d /var/lib/cybersafe-proxy
+ReadWritePaths=-/etc/nginx/conf.d -/etc/nginx/cybersafe /var/lib/cybersafe-proxy
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

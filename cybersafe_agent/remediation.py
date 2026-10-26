@@ -33,6 +33,7 @@ import requests
 
 # [R11-IMPORTS]
 from .order_guard import OrderRejected, ReplayJournal, guard_order
+from . import proxy_rules  # [R12-P4B]
 from .paths import get_state_dir
 
 logger = logging.getLogger("cybersafe.remediation")
@@ -313,7 +314,7 @@ def _proxy_read_desired():
         with open(_proxy_desired_path(), "r", encoding="utf-8") as fh:
             obj = json.load(fh)
     except FileNotFoundError:
-        return {"generation": 0, "deny": []}
+        return {"generation": 0, "deny": [], "waf": {}, "geo": []}
     except (OSError, ValueError):
         return None
     if not isinstance(obj, dict) or not isinstance(obj.get("deny"), list):
@@ -321,15 +322,25 @@ def _proxy_read_desired():
     gen = obj.get("generation")
     if not isinstance(gen, int) or isinstance(gen, bool) or gen < 0:
         return None
+    # [R12-P4B] regles WAF et pays (absents des etats ecrits par l'agent 2.2.0).
+    obj.setdefault("waf", {})
+    obj.setdefault("geo", [])
+    if not isinstance(obj["waf"], dict) or not isinstance(obj["geo"], list):
+        return None
     return obj
 
 
-def _proxy_write_desired(generation, deny):
+def _proxy_write_desired(generation, deny, waf=None, geo=None):
     os.makedirs(_PROXY_DIR, mode=0o750, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".desired-", dir=_PROXY_DIR)
+    data = {"generation": generation, "deny": sorted(deny)}
+    if waf:  # [R12-P4B] cles absentes quand vides : etat lisible par l'unite 2.2.0
+        data["waf"] = {k: waf[k] for k in sorted(waf)}
+    if geo:
+        data["geo"] = sorted(geo)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"generation": generation, "deny": sorted(deny)}, fh)
+            json.dump(data, fh)
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, 0o640)
@@ -373,15 +384,19 @@ def _proxy_change(ip, block):
     current = _proxy_read_desired()
     if current is None:
         return False, "etat du reverse proxy illisible (%s) : rien n'a ete modifie" % _proxy_desired_path()
-    before = set(current["deny"])
-    after = set(before)
+    after = set(current["deny"])
     if block:
         after.add(ip)
     else:
         after.discard(ip)
+    return _proxy_commit(current, after, current["waf"], current["geo"])
+
+
+def _proxy_commit(current, deny, waf, geo):
+    """[R12-P4B] Ecrit le nouvel etat, attend l'unite root ; en cas d'echec, remet l'etat d'avant."""
     generation = current["generation"] + 1
     try:
-        _proxy_write_desired(generation, after)
+        _proxy_write_desired(generation, deny, waf, geo)
     except OSError as exc:
         return False, "ecriture de l'etat voulu impossible : %s" % exc
     st = _proxy_wait(generation)
@@ -389,13 +404,52 @@ def _proxy_change(ip, block):
         return True, "nginx: %s" % st.get("detail")
     # Echec ou silence : on remet l'etat voulu comme avant.
     try:
-        _proxy_write_desired(generation + 1, before)
+        _proxy_write_desired(generation + 1, current["deny"], current["waf"], current["geo"])
     except OSError:
         logger.exception("[remediation] retour arriere de l'etat voulu impossible")
     if st is None:
         return False, ("aucune reponse de cybersafe-proxy-apply (unite non installee, ou "
                        "nginx bloque) : etat precedent remis")
     return False, "nginx: %s" % st.get("detail")
+
+def _waf_change(key, rule, value, add):
+    """[R12-P4B] Ajoute ou retire une regle WAF temporaire (revalidee ici)."""
+    if not proxy_rules.is_waf_key(key):
+        return False, "identifiant de regle WAF invalide"
+    if add:
+        err = proxy_rules.waf_error(rule, value)
+        if err:
+            return False, "regle WAF refusee : %s" % err
+        if proxy_rules.waf_key(rule, value) != key:
+            return False, "regle WAF incoherente avec son identifiant"
+    current = _proxy_read_desired()
+    if current is None:
+        return False, "etat du reverse proxy illisible (%s) : rien n'a ete modifie" % _proxy_desired_path()
+    waf = dict(current["waf"])
+    if add:
+        waf[key] = {"rule": rule, "value": value}
+    else:
+        waf.pop(key, None)
+    if len(waf) > proxy_rules.MAX_WAF_RULES:
+        return False, "trop de regles WAF actives sur ce serveur"
+    return _proxy_commit(current, current["deny"], waf, current["geo"])
+
+
+def _geo_change(country, add):
+    """[R12-P4B] Bloque ou debloque un pays au reverse proxy."""
+    if not proxy_rules.is_country(country):
+        return False, "code pays invalide"
+    current = _proxy_read_desired()
+    if current is None:
+        return False, "etat du reverse proxy illisible (%s) : rien n'a ete modifie" % _proxy_desired_path()
+    geo = set(current["geo"])
+    if add:
+        geo.add(country)
+    else:
+        geo.discard(country)
+    if len(geo) > proxy_rules.MAX_COUNTRIES:
+        return False, "trop de pays bloques sur ce serveur"
+    return _proxy_commit(current, current["deny"], current["waf"], sorted(geo))
 
 
 def _report(api_url, token, order_id, success, detail, rule_present=None):
@@ -497,6 +551,15 @@ def _process_order(order, api_url, token):
         ok, detail = _proxy_change(ip, True)
     elif action == "unblock_at_reverse_proxy":
         ok, detail = _proxy_change(ip, False)
+    elif action == "temporary_waf_rule":  # [R12-P4B]
+        p = order.get("params") or {}
+        ok, detail = _waf_change(ip, p.get("rule"), p.get("value"), True)
+    elif action == "remove_waf_rule":
+        ok, detail = _waf_change(ip, None, None, False)
+    elif action == "geo_block_country":
+        ok, detail = _geo_change(ip, True)
+    elif action == "geo_unblock_country":
+        ok, detail = _geo_change(ip, False)
     else:
         ok, detail = False, "action inconnue: %s" % action
 

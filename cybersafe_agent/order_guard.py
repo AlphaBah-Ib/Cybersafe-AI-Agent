@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from . import proxy_rules  # [R12-P4B]
+
 logger = logging.getLogger("cybersafe.remediation")
 
 # Cle publique de signature des ordres (Ed25519, 32 octets bruts, base64).
@@ -43,7 +45,9 @@ SIGNED_FIELDS_V2 = SIGNED_FIELDS + ("params",)
 SIG_V1, SIG_V2 = "ed25519", "ed25519-v2"
 ALLOWED_ACTIONS = frozenset({"ban_ip", "unban_ip", "rate_limit_ip", "remove_rate_limit",
                              "block_ip_range", "unblock_ip_range",  # [R12-P3]
-                             "block_at_reverse_proxy", "unblock_at_reverse_proxy"})  # [R12-P4]
+                             "block_at_reverse_proxy", "unblock_at_reverse_proxy",  # [R12-P4]
+                             "temporary_waf_rule", "remove_waf_rule",  # [R12-P4B]
+                             "geo_block_country", "geo_unblock_country"})
 # [R12-P3] plages : taille maximale, reseaux jamais bloquables par plage.
 RANGE_ACTIONS = frozenset({"block_ip_range", "unblock_ip_range"})
 RANGE_MIN_PREFIX = {4: 24, 6: 48}
@@ -56,6 +60,8 @@ _FORBIDDEN_RANGES = tuple(ipaddress.ip_network(n) for n in (
 PARAM_SPECS = {
     "rate_limit_ip": {"rate_per_minute": (1, 600), "burst": (1, 100)},
     "block_ip_range": {"justification": ("str", 10, 500)},
+    "temporary_waf_rule": {"rule": ("str", 1, 32), "value": ("str", 1, 200)},
+    "geo_block_country": {"justification": ("str", 10, 500)},
 }
 CLOCK_TOLERANCE_SECONDS = 60
 _DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -143,9 +149,37 @@ def check_range(order):
             raise OrderRejected("plage %s refusee (reseau reserve ou interne)" % net)
 
 
+# [R12-P4B] regles WAF temporaires et pays : cible = cle de regle ou code pays.
+PROXY_RULE_ACTIONS = {"temporary_waf_rule": "waf", "remove_waf_rule": "waf",
+                      "geo_block_country": "country", "geo_unblock_country": "country"}
+
+
+def check_proxy_target(order):
+    """Cible d'une regle WAF ou d'un pays, et regle WAF elle-meme (memes controles que le serveur)."""
+    action = order.get("action")
+    raw = order.get("target_ip")
+    if PROXY_RULE_ACTIONS[action] == "country":
+        if not proxy_rules.is_country(raw):
+            raise OrderRejected("code pays invalide: %r" % (raw,))
+        return
+    if not proxy_rules.is_waf_key(raw):
+        raise OrderRejected("identifiant de regle WAF invalide: %r" % (raw,))
+    if action == "temporary_waf_rule":
+        params = order.get("params")
+        if not isinstance(params, dict):
+            raise OrderRejected("parametres de la regle WAF illisibles")
+        err = proxy_rules.waf_error(params.get("rule"), params.get("value"))
+        if err:
+            raise OrderRejected("regle WAF refusee : %s" % err)
+        if proxy_rules.waf_key(params["rule"], params["value"]) != raw:
+            raise OrderRejected("regle WAF incoherente avec sa cible")
+
+
 def check_ip(order):
     if order.get("action") in RANGE_ACTIONS:  # [R12-P3]
         return check_range(order)
+    if order.get("action") in PROXY_RULE_ACTIONS:  # [R12-P4B]
+        return check_proxy_target(order)
     raw = order.get("target_ip")
     if not isinstance(raw, str) or not raw.strip():
         raise OrderRejected("target_ip vide")
