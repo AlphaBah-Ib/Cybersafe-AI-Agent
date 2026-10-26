@@ -343,6 +343,11 @@ if [[ -f "${UPDATE_SVC_SRC}" && -f "${UPDATE_TMR_SRC}" && -f "${UPDATE_CHECK_SRC
         || log_warn "auto-update timer enable differe."
     log_ok "Auto-update timer installed and enabled (verif nocturne + jitter)."
 fi
+
+# --- 6d. [R12-P4] Unites ajoutees ensuite (blocage au reverse proxy) ---------
+if [ -f "${AGENT_HOME}/packaging/linux/ensure-units.sh" ]; then
+    bash "${AGENT_HOME}/packaging/linux/ensure-units.sh" || log_warn "ensure-units differe."
+fi
 else
     log_warn "Remediation unit absente (${REMEDIATION_SRC}) - remediation non installee."
 fi

@@ -20,9 +20,13 @@ import logging
 import shutil
 import hashlib
 import ipaddress
+import json
+import os
 import shlex
 import subprocess
+import tempfile
 import threading
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -288,6 +292,112 @@ def _apply_range_block(net):
     return True, "%s: plage %s bloquee" % (tool, net)
 
 
+# [R12-P4] ---------------------------------------------------------------------
+# Blocage au reverse proxy (nginx). Ce service n'a PAS le droit d'ecrire dans
+# /etc/nginx ni de recharger nginx : il ecrit seulement l'« etat voulu » ; l'unite
+# root cybersafe-proxy-apply le revalide, teste nginx, recharge et ecrit un
+# statut que l'on attend ici. En cas d'echec, l'etat voulu est remis comme avant :
+# aucun blocage orphelin ne peut etre applique plus tard.
+_PROXY_DIR = "/var/lib/cybersafe/proxy"
+_PROXY_STATUS = "/var/lib/cybersafe-proxy/status.json"
+_PROXY_WAIT_SECONDS = 60.0
+
+
+def _proxy_desired_path():
+    return os.path.join(_PROXY_DIR, "desired.json")
+
+
+def _proxy_read_desired():
+    """Etat voulu actuel, ou None s'il est illisible (on n'ecrase jamais a l'aveugle)."""
+    try:
+        with open(_proxy_desired_path(), "r", encoding="utf-8") as fh:
+            obj = json.load(fh)
+    except FileNotFoundError:
+        return {"generation": 0, "deny": []}
+    except (OSError, ValueError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("deny"), list):
+        return None
+    gen = obj.get("generation")
+    if not isinstance(gen, int) or isinstance(gen, bool) or gen < 0:
+        return None
+    return obj
+
+
+def _proxy_write_desired(generation, deny):
+    os.makedirs(_PROXY_DIR, mode=0o750, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".desired-", dir=_PROXY_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"generation": generation, "deny": sorted(deny)}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o640)
+        os.replace(tmp, _proxy_desired_path())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _proxy_read_status():
+    try:
+        with open(_PROXY_STATUS, "r", encoding="utf-8") as fh:
+            obj = json.load(fh)
+        return obj if isinstance(obj, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _proxy_wait(generation, timeout=None):
+    """Attend le statut de cette generation (ou d'une plus recente). None si delai depasse."""
+    deadline = time.monotonic() + (_PROXY_WAIT_SECONDS if timeout is None else timeout)
+    while True:
+        st = _proxy_read_status()
+        gen = (st or {}).get("generation")
+        if isinstance(gen, int) and not isinstance(gen, bool) and gen >= generation:
+            return st
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(1.0)
+
+
+def _proxy_change(ip, block):
+    """Ajoute (block=True) ou retire une adresse du blocage au reverse proxy."""
+    try:
+        ip = str(ipaddress.ip_address(str(ip).strip()))
+    except ValueError:
+        return False, "adresse invalide"
+    current = _proxy_read_desired()
+    if current is None:
+        return False, "etat du reverse proxy illisible (%s) : rien n'a ete modifie" % _proxy_desired_path()
+    before = set(current["deny"])
+    after = set(before)
+    if block:
+        after.add(ip)
+    else:
+        after.discard(ip)
+    generation = current["generation"] + 1
+    try:
+        _proxy_write_desired(generation, after)
+    except OSError as exc:
+        return False, "ecriture de l'etat voulu impossible : %s" % exc
+    st = _proxy_wait(generation)
+    if st is not None and st.get("ok"):
+        return True, "nginx: %s" % st.get("detail")
+    # Echec ou silence : on remet l'etat voulu comme avant.
+    try:
+        _proxy_write_desired(generation + 1, before)
+    except OSError:
+        logger.exception("[remediation] retour arriere de l'etat voulu impossible")
+    if st is None:
+        return False, ("aucune reponse de cybersafe-proxy-apply (unite non installee, ou "
+                       "nginx bloque) : etat precedent remis")
+    return False, "nginx: %s" % st.get("detail")
+
+
 def _report(api_url, token, order_id, success, detail, rule_present=None):
     payload = {"success": success, "detail": detail}
     if rule_present is not None:
@@ -383,6 +493,10 @@ def _process_order(order, api_url, token):
         ok, detail = _apply_range_block(ip)
     elif action == "unblock_ip_range":
         ok, detail = _remove_range_block(ip)
+    elif action == "block_at_reverse_proxy":  # [R12-P4]
+        ok, detail = _proxy_change(ip, True)
+    elif action == "unblock_at_reverse_proxy":
+        ok, detail = _proxy_change(ip, False)
     else:
         ok, detail = False, "action inconnue: %s" % action
 

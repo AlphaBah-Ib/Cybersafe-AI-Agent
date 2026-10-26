@@ -236,6 +236,11 @@ if [ -f "${REMEDIATION_UNIT_SRC}" ]; then
   systemctl enable cybersafe-remediation.service >/dev/null 2>&1 || true
 fi
 
+# [R12-P4] unites systemd ajoutees apres l'installation (idempotent, non bloquant).
+if [ -f "${AGENT_HOME}/packaging/linux/ensure-units.sh" ]; then
+  bash "${AGENT_HOME}/packaging/linux/ensure-units.sh" || warn "ensure-units en echec (non bloquant)."
+fi
+
 info "Redemarrage du service ${SERVICE_NAME}..."
 systemctl restart "${SERVICE_NAME}"
 sleep 3

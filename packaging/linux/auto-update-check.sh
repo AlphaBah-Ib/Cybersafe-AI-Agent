@@ -35,6 +35,14 @@ if [ ! -f "${CONFIG_FILE}" ]; then
   log "Config introuvable (${CONFIG_FILE})."; exit 0
 fi
 
+# --- 0b. [R12-P4] Unites systemd ajoutees apres l'installation (idempotent) ---
+# Tourne a chaque passage, meme sans nouvelle version : une unite ajoutee par une
+# mise a jour est ainsi deployee au passage suivant. Non bloquant.
+ENSURE_UNITS="$(dirname "$(readlink -f "$0")")/ensure-units.sh"
+if [ -f "${ENSURE_UNITS}" ]; then
+  bash "${ENSURE_UNITS}" || log "ensure-units en echec (non bloquant)."
+fi
+
 # --- 1. Opt-out : le client peut figer sa version -------------------------
 ENABLED="$("${AGENT_VENV_PY}" -c "from cybersafe_agent.config import load_config; print(load_config('${CONFIG_FILE}').auto_update_enabled)" 2>/dev/null || echo "True")"
 if [ "${ENABLED}" != "True" ]; then

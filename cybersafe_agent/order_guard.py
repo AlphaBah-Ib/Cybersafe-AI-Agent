@@ -42,7 +42,8 @@ SIGNED_FIELDS = ("id", "action", "target_ip", "ttl_seconds", "agent_id",
 SIGNED_FIELDS_V2 = SIGNED_FIELDS + ("params",)
 SIG_V1, SIG_V2 = "ed25519", "ed25519-v2"
 ALLOWED_ACTIONS = frozenset({"ban_ip", "unban_ip", "rate_limit_ip", "remove_rate_limit",
-                             "block_ip_range", "unblock_ip_range"})  # [R12-P3]
+                             "block_ip_range", "unblock_ip_range",  # [R12-P3]
+                             "block_at_reverse_proxy", "unblock_at_reverse_proxy"})  # [R12-P4]
 # [R12-P3] plages : taille maximale, reseaux jamais bloquables par plage.
 RANGE_ACTIONS = frozenset({"block_ip_range", "unblock_ip_range"})
 RANGE_MIN_PREFIX = {4: 24, 6: 48}
