@@ -41,10 +41,20 @@ SIGNED_FIELDS = ("id", "action", "target_ip", "ttl_seconds", "agent_id",
 # [R12-P2] v2 : les parametres sont signes ; exigee des qu'un ordre en porte.
 SIGNED_FIELDS_V2 = SIGNED_FIELDS + ("params",)
 SIG_V1, SIG_V2 = "ed25519", "ed25519-v2"
-ALLOWED_ACTIONS = frozenset({"ban_ip", "unban_ip", "rate_limit_ip", "remove_rate_limit"})
+ALLOWED_ACTIONS = frozenset({"ban_ip", "unban_ip", "rate_limit_ip", "remove_rate_limit",
+                             "block_ip_range", "unblock_ip_range"})  # [R12-P3]
+# [R12-P3] plages : taille maximale, reseaux jamais bloquables par plage.
+RANGE_ACTIONS = frozenset({"block_ip_range", "unblock_ip_range"})
+RANGE_MIN_PREFIX = {4: 24, 6: 48}
+_FORBIDDEN_RANGES = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+    "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
+    "::/128", "::1/128", "::ffff:0:0/96", "fc00::/7", "fe80::/10", "ff00::/8",
+))
 # Parametres autorises par action : nom -> (min, max). Memes bornes que le serveur.
 PARAM_SPECS = {
     "rate_limit_ip": {"rate_per_minute": (1, 600), "burst": (1, 100)},
+    "block_ip_range": {"justification": ("str", 10, 500)},
 }
 CLOCK_TOLERANCE_SECONDS = 60
 _DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -114,7 +124,27 @@ def check_action(order):
         raise OrderRejected("action non autorisee: %r" % (action,))
 
 
+def check_range(order):
+    """[R12-P3] Plage CIDR exacte, taille bornee, jamais un reseau reserve ou interne."""
+    raw = order.get("target_ip")
+    if not isinstance(raw, str) or "/" not in raw:
+        raise OrderRejected("plage invalide (notation CIDR attendue): %r" % (raw,))
+    try:
+        net = ipaddress.ip_network(raw.strip(), strict=True)
+    except ValueError:
+        raise OrderRejected("plage invalide: %r" % (raw,)) from None
+    if net.prefixlen < RANGE_MIN_PREFIX[net.version]:
+        raise OrderRejected("plage trop large: %s (/%d minimum)" % (net, RANGE_MIN_PREFIX[net.version]))
+    if order.get("action") == "unblock_ip_range":
+        return  # une levee est toujours permise
+    for forbidden in _FORBIDDEN_RANGES:
+        if forbidden.version == net.version and net.overlaps(forbidden):
+            raise OrderRejected("plage %s refusee (reseau reserve ou interne)" % net)
+
+
 def check_ip(order):
+    if order.get("action") in RANGE_ACTIONS:  # [R12-P3]
+        return check_range(order)
     raw = order.get("target_ip")
     if not isinstance(raw, str) or not raw.strip():
         raise OrderRejected("target_ip vide")
@@ -212,8 +242,18 @@ def check_params(order):
     unknown = sorted(set(params) - set(spec))
     if unknown:
         raise OrderRejected("parametre(s) non autorise(s) : %s" % ", ".join(map(repr, unknown)))
-    for name, (lo, hi) in spec.items():
+    for name, bounds in spec.items():
         value = params.get(name)
+        if len(bounds) == 3:  # texte : ("str", longueur min, longueur max)
+            _, lo, hi = bounds
+            if not isinstance(value, str):
+                raise OrderRejected("parametre %s : texte attendu" % name)
+            if any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise OrderRejected("parametre %s : caracteres de controle interdits" % name)
+            if not lo <= len(value.strip()) <= hi:
+                raise OrderRejected("parametre %s : longueur hors bornes (%s a %s)" % (name, lo, hi))
+            continue
+        lo, hi = bounds
         if isinstance(value, bool) or not isinstance(value, int):
             raise OrderRejected("parametre %s : entier attendu" % name)
         if not lo <= value <= hi:

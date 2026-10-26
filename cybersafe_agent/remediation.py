@@ -19,6 +19,7 @@ GARDE-FOUS cote service (en plus de l'allowlist backend) :
 import logging
 import shutil
 import hashlib
+import ipaddress
 import shlex
 import subprocess
 import threading
@@ -217,6 +218,76 @@ def _apply_rate_limit(ip, rate_per_minute, burst):
     return True, "%s: limite a %d connexions/min (rafale %d)" % (tool, int(rate_per_minute), int(burst))
 
 
+# [R12-P3] ---------------------------------------------------------------------
+# Blocage de plage : regle DROP sur la plage, reperee par « cybersafe-range:<plage> ».
+
+def _range_comment(net):
+    return "cybersafe-range:%s" % net
+
+
+def _range_contains_any(net, ips):
+    """La plage contient-elle une des adresses donnees ? (faux si ce n'est pas une plage)"""
+    if "/" not in str(net):
+        return False
+    try:
+        network = ipaddress.ip_network(str(net), strict=False)
+    except ValueError:
+        return False
+    for ip in ips:
+        try:
+            if ipaddress.ip_address(ip) in network:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _rules_with_comment(tool, comment):
+    rc, out, _ = _run([tool, "-S", "INPUT"])
+    if rc != 0:
+        return []
+    found = []
+    for line in out.splitlines():
+        try:
+            args = shlex.split(line)
+        except ValueError:
+            continue
+        if args[:2] != ["-A", "INPUT"]:
+            continue
+        for i, arg in enumerate(args[:-1]):
+            if arg == "--comment" and args[i + 1] == comment:
+                found.append(args)
+                break
+    return found
+
+
+def _remove_range_block(net):
+    tool = _ipt(net)
+    if not shutil.which(tool):
+        return False, "%s introuvable" % tool
+    removed = 0
+    for args in _rules_with_comment(tool, _range_comment(net)):
+        rc, _, err = _run([tool, "-D"] + args[1:])
+        if rc != 0:
+            return False, "%s rc=%s err=%s" % (tool, rc, err)
+        removed += 1
+    return True, "%s: %d regle(s) de plage retiree(s)" % (tool, removed)
+
+
+def _apply_range_block(net):
+    tool = _ipt(net)
+    if not shutil.which(tool):
+        return False, "%s introuvable" % tool
+    ok, detail = _remove_range_block(net)  # idempotent
+    if not ok:
+        return False, detail
+    rc, _, err = _run([tool, "-I", "INPUT", "-s", net,
+                       "-m", "comment", "--comment", _range_comment(net), "-j", "DROP"])
+    if rc != 0:
+        return False, "%s rc=%s err=%s" % (tool, rc, err)
+    return True, "%s: plage %s bloquee" % (tool, net)
+
+
 def _report(api_url, token, order_id, success, detail, rule_present=None):
     payload = {"success": success, "detail": detail}
     if rule_present is not None:
@@ -289,9 +360,9 @@ def _process_order(order, api_url, token):
 
     # GARDE-FOU anti-lockout : ne pas bannir une IP de session SSH active.
     # [R12-P2] ni la limiter : une limitation peut bloquer une reconnexion.
-    if action in ("ban_ip", "rate_limit_ip"):
+    if action in ("ban_ip", "rate_limit_ip", "block_ip_range"):  # [R12-P3] plage comprise
         active = _active_ssh_source_ips()
-        if ip in active:
+        if ip in active or _range_contains_any(ip, active):
             logger.warning("[remediation] ANTI-LOCKOUT: refus de bannir %s "
                            "(session SSH active)", ip)
             _report(api_url, token, oid, False,
@@ -308,6 +379,10 @@ def _process_order(order, api_url, token):
         ok, detail = _apply_rate_limit(ip, p["rate_per_minute"], p["burst"])
     elif action == "remove_rate_limit":
         ok, detail = _remove_rate_limit(ip)
+    elif action == "block_ip_range":
+        ok, detail = _apply_range_block(ip)
+    elif action == "unblock_ip_range":
+        ok, detail = _remove_range_block(ip)
     else:
         ok, detail = False, "action inconnue: %s" % action
 
