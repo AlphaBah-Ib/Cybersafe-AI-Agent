@@ -18,6 +18,8 @@ GARDE-FOUS cote service (en plus de l'allowlist backend) :
 """
 import logging
 import shutil
+import hashlib
+import shlex
 import subprocess
 import threading
 from urllib.parse import urlparse
@@ -84,7 +86,7 @@ def _apply_ban(ip, fw):
     if fw == "ufw":
         cmd = ["ufw", "deny", "from", ip]
     elif fw == "iptables":
-        cmd = ["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"]
+        cmd = [_ipt(ip), "-I", "INPUT", "-s", ip, "-j", "DROP"]
     else:
         return False, "aucun firewall (ufw/iptables) detecte"
     try:
@@ -100,7 +102,7 @@ def _apply_unban(ip, fw):
     if fw == "ufw":
         cmd = ["ufw", "delete", "deny", "from", ip]
     elif fw == "iptables":
-        cmd = ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"]
+        cmd = [_ipt(ip), "-D", "INPUT", "-s", ip, "-j", "DROP"]
     else:
         return False, "aucun firewall detecte"
     try:
@@ -121,7 +123,7 @@ def _rule_present(ip, fw):
     if fw != "iptables":
         return None
     try:
-        r = subprocess.run(["iptables", "-C", "INPUT", "-s", ip, "-j", "DROP"],
+        r = subprocess.run([_ipt(ip), "-C", "INPUT", "-s", ip, "-j", "DROP"],
                            capture_output=True, text=True, timeout=15)
     except Exception as exc:  # noqa: BLE001
         logger.debug("[remediation] constat KO pour %s: %s", ip, exc)
@@ -131,6 +133,88 @@ def _rule_present(ip, fw):
     if r.returncode == 1:
         return False
     return None
+
+
+# [R12-P2] ---------------------------------------------------------------------
+# Limitation de debit : au-dela de N nouvelles connexions par minute depuis l'IP,
+# les suivantes sont rejetees (connexions etablies intactes). La regle porte un
+# commentaire « cybersafe-rl:<ip> » pour etre retrouvee et retiree sans connaitre
+# ses parametres. Commandes precises, jamais de shell.
+
+def _ipt(ip):
+    """iptables pour IPv4, ip6tables pour IPv6."""
+    return "ip6tables" if ":" in str(ip) else "iptables"
+
+
+def _rl_comment(ip):
+    return "cybersafe-rl:%s" % ip
+
+
+def _rl_name(ip):
+    # nom de table hashlimit : 15 caracteres au plus
+    return "csrl" + hashlib.sha1(str(ip).encode("ascii")).hexdigest()[:11]
+
+
+def _run(cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return r.returncode, (r.stdout or ""), (r.stderr or "").strip()[:500]
+    except Exception as exc:  # noqa: BLE001
+        return -1, "", "exception: %s" % exc
+
+
+def _rate_limit_rules(ip):
+    """Regles de limitation existantes pour cette IP (lignes de iptables -S, decoupees)."""
+    tool = _ipt(ip)
+    rc, out, _ = _run([tool, "-S", "INPUT"])
+    if rc != 0:
+        return []
+    found = []
+    for line in out.splitlines():
+        try:
+            args = shlex.split(line)
+        except ValueError:
+            continue
+        if args[:2] != ["-A", "INPUT"]:
+            continue
+        for i, arg in enumerate(args[:-1]):
+            if arg == "--comment" and args[i + 1] == _rl_comment(ip):
+                found.append(args)
+                break
+    return found
+
+
+def _remove_rate_limit(ip):
+    tool = _ipt(ip)
+    if not shutil.which(tool):
+        return False, "%s introuvable" % tool
+    removed = 0
+    for args in _rate_limit_rules(ip):
+        rc, _, err = _run([tool, "-D"] + args[1:])
+        if rc != 0:
+            return False, "%s rc=%s err=%s" % (tool, rc, err)
+        removed += 1
+    return True, "%s: %d regle(s) de limitation retiree(s)" % (tool, removed)
+
+
+def _apply_rate_limit(ip, rate_per_minute, burst):
+    tool = _ipt(ip)
+    if not shutil.which(tool):
+        return False, "%s introuvable" % tool
+    ok, detail = _remove_rate_limit(ip)  # idempotent : jamais deux regles pour une IP
+    if not ok:
+        return False, detail
+    cmd = [tool, "-I", "INPUT", "-s", ip,
+           "-m", "conntrack", "--ctstate", "NEW",
+           "-m", "hashlimit", "--hashlimit-name", _rl_name(ip), "--hashlimit-mode", "srcip",
+           "--hashlimit-above", "%d/minute" % int(rate_per_minute),
+           "--hashlimit-burst", str(int(burst)),
+           "-m", "comment", "--comment", _rl_comment(ip),
+           "-j", "DROP"]
+    rc, out, err = _run(cmd)
+    if rc != 0:
+        return False, "%s rc=%s err=%s" % (tool, rc, err)
+    return True, "%s: limite a %d connexions/min (rafale %d)" % (tool, int(rate_per_minute), int(burst))
 
 
 def _report(api_url, token, order_id, success, detail, rule_present=None):
@@ -204,7 +288,8 @@ def _process_order(order, api_url, token):
         return
 
     # GARDE-FOU anti-lockout : ne pas bannir une IP de session SSH active.
-    if action == "ban_ip":
+    # [R12-P2] ni la limiter : une limitation peut bloquer une reconnexion.
+    if action in ("ban_ip", "rate_limit_ip"):
         active = _active_ssh_source_ips()
         if ip in active:
             logger.warning("[remediation] ANTI-LOCKOUT: refus de bannir %s "
@@ -218,6 +303,11 @@ def _process_order(order, api_url, token):
         ok, detail = _apply_ban(ip, fw)
     elif action == "unban_ip":
         ok, detail = _apply_unban(ip, fw)
+    elif action == "rate_limit_ip":
+        p = order.get("params") or {}
+        ok, detail = _apply_rate_limit(ip, p["rate_per_minute"], p["burst"])
+    elif action == "remove_rate_limit":
+        ok, detail = _remove_rate_limit(ip)
     else:
         ok, detail = False, "action inconnue: %s" % action
 

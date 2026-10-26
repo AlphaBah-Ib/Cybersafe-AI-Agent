@@ -38,7 +38,14 @@ _ORDER_PUBLIC_KEY_B64 = "lKBAW4dPQGloYAXNUlzs+E8bzsMIDlHfMRbXrx8pwsk="
 
 SIGNED_FIELDS = ("id", "action", "target_ip", "ttl_seconds", "agent_id",
                  "issued_at", "expires_at", "nonce")
-ALLOWED_ACTIONS = frozenset({"ban_ip", "unban_ip"})
+# [R12-P2] v2 : les parametres sont signes ; exigee des qu'un ordre en porte.
+SIGNED_FIELDS_V2 = SIGNED_FIELDS + ("params",)
+SIG_V1, SIG_V2 = "ed25519", "ed25519-v2"
+ALLOWED_ACTIONS = frozenset({"ban_ip", "unban_ip", "rate_limit_ip", "remove_rate_limit"})
+# Parametres autorises par action : nom -> (min, max). Memes bornes que le serveur.
+PARAM_SPECS = {
+    "rate_limit_ip": {"rate_per_minute": (1, 600), "burst": (1, 100)},
+}
 CLOCK_TOLERANCE_SECONDS = 60
 _DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _FORBIDDEN_IP_KINDS = (
@@ -54,8 +61,8 @@ class OrderRejected(Exception):
     """Ordre refuse ; le message est remonte au serveur et journalise [AUDIT]."""
 
 
-def canonical(order):
-    body = {k: order.get(k) for k in SIGNED_FIELDS}
+def canonical(order, fields=SIGNED_FIELDS):
+    body = {k: order.get(k) for k in fields}
     return json.dumps(body, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True).encode("ascii")
 
@@ -65,7 +72,7 @@ def _public_key():
 
 
 def check_signature(order):
-    if order.get("sig_alg") != "ed25519":
+    if order.get("sig_alg") not in (SIG_V1, SIG_V2):
         raise OrderRejected("ordre non signe ou algorithme non supporte (sig_alg=%r)"
                             % (order.get("sig_alg"),))
     sig_b64 = order.get("signature")
@@ -76,7 +83,8 @@ def check_signature(order):
     except (binascii.Error, ValueError):
         raise OrderRejected("signature illisible") from None
     try:
-        _public_key().verify(sig, canonical(order))
+        fields = SIGNED_FIELDS_V2 if order.get("sig_alg") == SIG_V2 else SIGNED_FIELDS
+        _public_key().verify(sig, canonical(order, fields))
     except (InvalidSignature, ValueError):
         raise OrderRejected("signature invalide") from None
 
@@ -191,6 +199,27 @@ class ReplayJournal:
                                    "(memoire conservee) : %s", exc)
 
 
+def check_params(order):
+    """[R12-P2] Parametres : signes (v2), liste fermee, entiers dans les bornes."""
+    params = order.get("params")
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise OrderRejected("parametres illisibles")
+    spec = PARAM_SPECS.get(order.get("action"), {})
+    if (params or spec) and order.get("sig_alg") != SIG_V2:
+        raise OrderRejected("parametres non signes (signature v2 exigee)")
+    unknown = sorted(set(params) - set(spec))
+    if unknown:
+        raise OrderRejected("parametre(s) non autorise(s) : %s" % ", ".join(map(repr, unknown)))
+    for name, (lo, hi) in spec.items():
+        value = params.get(name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise OrderRejected("parametre %s : entier attendu" % name)
+        if not lo <= value <= hi:
+            raise OrderRejected("parametre %s hors bornes (%s a %s)" % (name, lo, hi))
+
+
 def guard_order(order, journal, now=None):
     """
     Leve OrderRejected si l'ordre ne doit pas etre execute. La signature est
@@ -202,6 +231,7 @@ def guard_order(order, journal, now=None):
     check_signature(order)
     expires = check_expiry(order, now)
     check_action(order)
+    check_params(order)  # [R12-P2]
     check_ip(order)
     nonce = order.get("nonce")
     if not isinstance(nonce, str) or not nonce:
