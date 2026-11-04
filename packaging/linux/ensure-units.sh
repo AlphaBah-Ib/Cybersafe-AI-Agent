@@ -14,6 +14,12 @@
 #     cybersafe-proxy-apply.service (root) qui revalide tout, teste nginx et
 #     recharge ; le statut est ecrit dans /var/lib/cybersafe-proxy (root).
 #
+# US-SOC-R14 porte 2 : cybersafe-isolation-guard (minuteur de securite de l'isolation).
+#   - toutes les 30 s, root, independant du service de remediation ;
+#   - restaure le reseau a l'echeance ou si plus aucun contact avec Cybersafe-AI ;
+#   - horodatage dans /var/lib/cybersafe-isolation (root) : sans lui, l'agent
+#     refuse toute isolation.
+#
 set -euo pipefail
 
 log(){ echo "[ensure-units] $*"; }
@@ -48,6 +54,10 @@ install -d -o root -g root -m 0755 /var/lib/cybersafe-proxy
 if [ -d /etc/nginx ]; then
   install -d -o root -g root -m 0755 /etc/nginx/cybersafe
 fi
+
+# [R14-P2] etat d'isolation (service) et horodatage du minuteur (root).
+install -d -o cybersafe -g cybersafe -m 0750 /var/lib/cybersafe/isolation
+install -d -o root -g root -m 0755 /var/lib/cybersafe-isolation
 
 # --- Unites ---------------------------------------------------------------------
 PROXY_SERVICE="$(cat <<'EOF'
@@ -94,12 +104,62 @@ WantedBy=multi-user.target
 EOF
 )"
 
+# [R14-P2] minuteur de securite de l'isolation : il ne fait que RETIRER l'isolation.
+GUARD_SERVICE="$(cat <<'EOF'
+[Unit]
+Description=Cybersafe-AI - minuteur de securite de l'isolation reseau (restauration automatique)
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+ConditionPathExists=/opt/cybersafe-agent/venv/bin/python
+
+[Service]
+Type=oneshot
+# root (capacites reduites) : lit l'etat ecrit par le service, retire les regles
+# d'isolation, ecrit son horodatage. Independant du service de remediation.
+User=root
+WorkingDirectory=/opt/cybersafe-agent
+ExecStart=/opt/cybersafe-agent/venv/bin/python -m cybersafe_agent.isolation_guard
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cybersafe-isolation-guard
+TimeoutStartSec=60
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cybersafe /var/lib/cybersafe-isolation
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+EOF
+)"
+
+GUARD_TIMER="$(cat <<'EOF'
+[Unit]
+Description=Cybersafe-AI - declencheur du minuteur de securite de l'isolation (30 s)
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+EOF
+)"
+
 write_unit /etc/systemd/system/cybersafe-proxy-apply.service "${PROXY_SERVICE}"
 write_unit /etc/systemd/system/cybersafe-proxy-apply.path "${PROXY_PATH}"
+write_unit /etc/systemd/system/cybersafe-isolation-guard.service "${GUARD_SERVICE}"
+write_unit /etc/systemd/system/cybersafe-isolation-guard.timer "${GUARD_TIMER}"
 
 if [ "${CHANGED}" = "1" ]; then
   systemctl daemon-reload
 fi
 systemctl enable cybersafe-proxy-apply.path >/dev/null 2>&1 || log "enable du .path differe."
 systemctl start cybersafe-proxy-apply.path >/dev/null 2>&1 || log "demarrage du .path differe."
+systemctl enable cybersafe-isolation-guard.timer >/dev/null 2>&1 || log "enable du minuteur d'isolation differe."
+systemctl start cybersafe-isolation-guard.timer >/dev/null 2>&1 || log "demarrage du minuteur d'isolation differe."
 log "Unites a jour."

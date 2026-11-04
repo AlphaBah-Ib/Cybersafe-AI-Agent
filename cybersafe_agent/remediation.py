@@ -34,11 +34,13 @@ import requests
 # [R11-IMPORTS]
 from .order_guard import OrderRejected, ReplayJournal, guard_order
 from . import proxy_rules  # [R12-P4B]
+from . import isolation  # [R14-P2]
 from .paths import get_state_dir
 
 logger = logging.getLogger("cybersafe.remediation")
 
 _HTTP_TIMEOUT = 10.0
+_poll_interval = 60.0  # [R14-P2] lu par l'isolation (delai de l'interrupteur de securite)
 
 
 def _orders_url(api_url):
@@ -534,7 +536,13 @@ def _process_order(order, api_url, token):
             return
 
     fw = _detect_firewall()
-    if action == "ban_ip":
+    iso_rule = None  # [R14-P2] constat de l'isolation
+    if action == "isolate_host":
+        ok, detail, iso_rule = isolation.isolate(order, api_url, _poll_interval,
+                                                 _active_ssh_source_ips())
+    elif action == "restore_network":
+        ok, detail = isolation.restore_all()
+    elif action == "ban_ip":
         ok, detail = _apply_ban(ip, fw)
     elif action == "unban_ip":
         ok, detail = _apply_unban(ip, fw)
@@ -564,7 +572,7 @@ def _process_order(order, api_url, token):
         ok, detail = False, "action inconnue: %s" % action
 
     # v1.8.1 : apres un ban reussi, constat de la regle (lecture seule).
-    rule = _rule_present(ip, fw) if (ok and action == "ban_ip") else None
+    rule = _rule_present(ip, fw) if (ok and action == "ban_ip") else iso_rule
     if rule is False:
         logger.warning("[remediation] order=%s regle absente apres le ban de %s", oid, ip)
     level = logging.INFO if ok else logging.WARNING
@@ -586,6 +594,7 @@ def _poll_once(api_url, token):
             logger.debug("[remediation] pull HTTP %s", r.status_code)
             return
         orders = (r.json() or {}).get("orders", [])
+        isolation.write_heartbeat()  # [R14-P2] contact etabli (interrupteur de securite)
     except Exception as exc:  # noqa: BLE001
         logger.debug("[remediation] pull KO: %s", exc)
         return
@@ -599,7 +608,9 @@ def remediation_loop(config, stop_event):
     Boucle : interroge le backend toutes les `remediation_poll_interval` secondes.
     S'arrete proprement quand stop_event est arme.
     """
+    global _poll_interval
     interval = getattr(config, "remediation_poll_interval", 60.0)
+    _poll_interval = interval  # [R14-P2]
     api_url = config.api_url
     token = config.token
     # [R11-HTTPS-LOOP] jamais d'ordres de pare-feu sur un canal non chiffre.

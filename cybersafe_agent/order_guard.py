@@ -47,7 +47,10 @@ ALLOWED_ACTIONS = frozenset({"ban_ip", "unban_ip", "rate_limit_ip", "remove_rate
                              "block_ip_range", "unblock_ip_range",  # [R12-P3]
                              "block_at_reverse_proxy", "unblock_at_reverse_proxy",  # [R12-P4]
                              "temporary_waf_rule", "remove_waf_rule",  # [R12-P4B]
-                             "geo_block_country", "geo_unblock_country"})
+                             "geo_block_country", "geo_unblock_country",
+                             "isolate_host", "restore_network"})  # [R14-P2]
+# [R14-P2] isolation : la cible est « host:<id de l'agent> », jamais un autre serveur.
+HOST_ACTIONS = frozenset({"isolate_host", "restore_network"})
 # [R12-P3] plages : taille maximale, reseaux jamais bloquables par plage.
 RANGE_ACTIONS = frozenset({"block_ip_range", "unblock_ip_range"})
 RANGE_MIN_PREFIX = {4: 24, 6: 48}
@@ -62,6 +65,7 @@ PARAM_SPECS = {
     "block_ip_range": {"justification": ("str", 10, 500)},
     "temporary_waf_rule": {"rule": ("str", 1, 32), "value": ("str", 1, 200)},
     "geo_block_country": {"justification": ("str", 10, 500)},
+    "isolate_host": {"justification": ("str", 10, 500), "preserve": ("cidrs", 0, 64)},  # [R14-P2]
 }
 CLOCK_TOLERANCE_SECONDS = 60
 _DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -175,7 +179,33 @@ def check_proxy_target(order):
             raise OrderRejected("regle WAF incoherente avec sa cible")
 
 
+def check_host_target(order):
+    """[R14-P2] Un agent n'isole (ou ne restaure) QUE son propre serveur."""
+    agent_id = order.get("agent_id")
+    if isinstance(agent_id, bool) or not isinstance(agent_id, int) or agent_id <= 0:
+        raise OrderRejected("agent_id invalide: %r" % (agent_id,))
+    if order.get("target_ip") != "host:%d" % agent_id:
+        raise OrderRejected("cible %r : ce serveur est host:%d" % (order.get("target_ip"), agent_id))
+
+
+def _check_cidrs(name, value, hi):
+    """[R14-P2] Liste de reseaux : jamais « tout » (/0), au plus `hi` entrees."""
+    if not isinstance(value, list) or len(value) > hi:
+        raise OrderRejected("parametre %s : liste de %s reseaux au plus attendue" % (name, hi))
+    for item in value:
+        if not isinstance(item, str):
+            raise OrderRejected("parametre %s : reseau invalide %r" % (name, item))
+        try:
+            net = ipaddress.ip_network(item.strip(), strict=False)
+        except ValueError:
+            raise OrderRejected("parametre %s : reseau invalide %r" % (name, item)) from None
+        if net.prefixlen == 0:
+            raise OrderRejected("parametre %s : reseau trop large %s" % (name, net))
+
+
 def check_ip(order):
+    if order.get("action") in HOST_ACTIONS:  # [R14-P2]
+        return check_host_target(order)
     if order.get("action") in RANGE_ACTIONS:  # [R12-P3]
         return check_range(order)
     if order.get("action") in PROXY_RULE_ACTIONS:  # [R12-P4B]
@@ -271,6 +301,8 @@ def check_params(order):
         params = {}
     if not isinstance(params, dict):
         raise OrderRejected("parametres illisibles")
+    if order.get("action") == "restore_network":  # [R14-P2] parametres inutilises : une
+        return                                    # restauration n'est jamais bloquee par eux
     spec = PARAM_SPECS.get(order.get("action"), {})
     if (params or spec) and order.get("sig_alg") != SIG_V2:
         raise OrderRejected("parametres non signes (signature v2 exigee)")
@@ -279,6 +311,9 @@ def check_params(order):
         raise OrderRejected("parametre(s) non autorise(s) : %s" % ", ".join(map(repr, unknown)))
     for name, bounds in spec.items():
         value = params.get(name)
+        if bounds[0] == "cidrs":  # [R14-P2] ("cidrs", min, max entrees)
+            _check_cidrs(name, value, bounds[2])
+            continue
         if len(bounds) == 3:  # texte : ("str", longueur min, longueur max)
             _, lo, hi = bounds
             if not isinstance(value, str):
