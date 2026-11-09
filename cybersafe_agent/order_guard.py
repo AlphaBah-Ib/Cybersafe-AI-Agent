@@ -23,6 +23,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -48,7 +49,14 @@ ALLOWED_ACTIONS = frozenset({"ban_ip", "unban_ip", "rate_limit_ip", "remove_rate
                              "block_at_reverse_proxy", "unblock_at_reverse_proxy",  # [R12-P4]
                              "temporary_waf_rule", "remove_waf_rule",  # [R12-P4B]
                              "geo_block_country", "geo_unblock_country",
-                             "isolate_host", "restore_network"})  # [R14-P2]
+                             "isolate_host", "restore_network",  # [R14-P2]
+                             "inspect_process", "quarantine_process",  # [R15-P2]
+                             "release_process", "kill_process"})
+# [R15-P2] processus : INSPECT cible « port:<n> » / « pid:<n> » ; les autres ciblent une
+# preuve (« proc:<id> ») et portent l'empreinte SIGNEE du processus.
+PROCESS_ACTIONS = frozenset({"inspect_process", "quarantine_process", "release_process",
+                             "kill_process"})
+PROCESS_ACTING = PROCESS_ACTIONS - {"inspect_process"}
 # [R14-P2] isolation : la cible est « host:<id de l'agent> », jamais un autre serveur.
 HOST_ACTIONS = frozenset({"isolate_host", "restore_network"})
 # [R12-P3] plages : taille maximale, reseaux jamais bloquables par plage.
@@ -66,6 +74,9 @@ PARAM_SPECS = {
     "temporary_waf_rule": {"rule": ("str", 1, 32), "value": ("str", 1, 200)},
     "geo_block_country": {"justification": ("str", 10, 500)},
     "isolate_host": {"justification": ("str", 10, 500), "preserve": ("cidrs", 0, 64)},  # [R14-P2]
+    "quarantine_process": {"justification": ("str", 10, 500), "fingerprint": ("fingerprint",)},  # [R15-P2]
+    "kill_process": {"justification": ("str", 10, 500), "fingerprint": ("fingerprint",)},
+    "release_process": {"fingerprint": ("fingerprint",)},
 }
 CLOCK_TOLERANCE_SECONDS = 60
 _DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -203,7 +214,57 @@ def _check_cidrs(name, value, hi):
             raise OrderRejected("parametre %s : reseau trop large %s" % (name, net))
 
 
+_PROC_SELECTOR_RE = re.compile(r"^(port|pid):([1-9][0-9]{0,6})$")  # [R15-P2]
+_PROC_EVIDENCE_RE = re.compile(r"^proc:[1-9][0-9]{0,11}$")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_FINGERPRINT_KEYS = frozenset({"pid", "start_ticks", "boot_id", "exe", "exe_sha256",
+                               "cmdline_sha256", "uid"})
+
+
+def _is_int(value, lo, hi):
+    return not isinstance(value, bool) and isinstance(value, int) and lo <= value <= hi
+
+
+def check_process_target(order):
+    """[R15-P2] Inspection : port 1-65535 ou PID 2-4194304 ; action : une preuve (proc:<id>)."""
+    raw = order.get("target_ip")
+    if order.get("action") == "inspect_process":
+        m = _PROC_SELECTOR_RE.match(raw) if isinstance(raw, str) else None
+        if not m:
+            raise OrderRejected("cible d'inspection invalide: %r" % (raw,))
+        num = int(m.group(2))
+        if (m.group(1) == "port" and not 1 <= num <= 65535) or (m.group(1) == "pid" and not 2 <= num <= 4194304):
+            raise OrderRejected("cible d'inspection hors bornes: %r" % (raw,))
+        return
+    if not isinstance(raw, str) or not _PROC_EVIDENCE_RE.match(raw):
+        raise OrderRejected("cible de processus invalide (preuve proc:<id> attendue): %r" % (raw,))
+
+
+def check_fingerprint(name, value):
+    """[R15-P2] Empreinte du processus : exactement ces champs, chacun dans ses bornes."""
+    if not isinstance(value, dict) or set(value) != _FINGERPRINT_KEYS:
+        raise OrderRejected("parametre %s : empreinte du processus incomplete ou inattendue" % name)
+    if not _is_int(value["pid"], 2, 4194304) or not _is_int(value["uid"], 0, 4294967295):
+        raise OrderRejected("parametre %s : PID ou uid invalide" % name)
+    st = value["start_ticks"]
+    if not isinstance(st, str) or not st.isdigit() or len(st) > 20:
+        raise OrderRejected("parametre %s : heure de demarrage invalide" % name)
+    if not isinstance(value["boot_id"], str) or not _UUID_RE.match(value["boot_id"]):
+        raise OrderRejected("parametre %s : boot_id invalide" % name)
+    exe = value["exe"]
+    if not isinstance(exe, str) or not exe or len(exe) > 1024:
+        raise OrderRejected("parametre %s : executable invalide" % name)
+    if not isinstance(value["exe_sha256"], str) or not (value["exe_sha256"] == ""
+                                                        or _HEX64_RE.match(value["exe_sha256"])):
+        raise OrderRejected("parametre %s : hash de l'executable invalide" % name)
+    if not isinstance(value["cmdline_sha256"], str) or not _HEX64_RE.match(value["cmdline_sha256"]):
+        raise OrderRejected("parametre %s : hash de la ligne de commande invalide" % name)
+
+
 def check_ip(order):
+    if order.get("action") in PROCESS_ACTIONS:  # [R15-P2]
+        return check_process_target(order)
     if order.get("action") in HOST_ACTIONS:  # [R14-P2]
         return check_host_target(order)
     if order.get("action") in RANGE_ACTIONS:  # [R12-P3]
@@ -313,6 +374,9 @@ def check_params(order):
         value = params.get(name)
         if bounds[0] == "cidrs":  # [R14-P2] ("cidrs", min, max entrees)
             _check_cidrs(name, value, bounds[2])
+            continue
+        if bounds[0] == "fingerprint":  # [R15-P2] empreinte signee du processus
+            check_fingerprint(name, value)
             continue
         if len(bounds) == 3:  # texte : ("str", longueur min, longueur max)
             _, lo, hi = bounds

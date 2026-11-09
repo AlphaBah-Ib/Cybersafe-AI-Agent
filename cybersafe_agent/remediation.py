@@ -33,6 +33,7 @@ import requests
 
 # [R11-IMPORTS]
 from .order_guard import OrderRejected, ReplayJournal, guard_order
+from .order_guard import PROCESS_ACTIONS  # [R15-P2]
 from . import proxy_rules  # [R12-P4B]
 from . import isolation  # [R14-P2]
 from .paths import get_state_dir
@@ -454,10 +455,78 @@ def _geo_change(country, add):
     return _proxy_commit(current, current["deny"], current["waf"], sorted(geo))
 
 
-def _report(api_url, token, order_id, success, detail, rule_present=None):
+# [R15-P2] reponse sur processus : le service (non privilegie, sans vue sur les autres
+# processus) depose l'ordre SIGNE ; l'unite root cybersafe-process-apply le re-verifie
+# entierement, agit et ecrit son resultat (preuve comprise) dans un dossier root.
+_PROC_DIR = "/var/lib/cybersafe/process"
+_PROC_RESULT_DIR = "/var/lib/cybersafe-process"
+_PROC_UNIT = "/etc/systemd/system/cybersafe-process-apply.path"
+_PROC_WAIT_SECONDS = 90.0
+
+
+def _process_write_request(order):
+    os.makedirs(_PROC_DIR, mode=0o750, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".request-", dir=_PROC_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"order": order}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o640)
+        os.replace(tmp, os.path.join(_PROC_DIR, "request.json"))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _process_action(order, timeout=None):
+    """[R15-P2] (ok, detail, preuve) : delegue a l'unite root, attend son resultat."""
+    import sys
+    if not sys.platform.startswith("linux"):
+        return False, "reponse sur processus disponible sur Linux uniquement", None
+    if not os.path.exists(_PROC_UNIT):
+        return False, ("unite cybersafe-process-apply absente : relancer "
+                       "/opt/cybersafe-agent/packaging/linux/ensure-units.sh (root)"), None
+    oid = order.get("id")
+    if isinstance(oid, bool) or not isinstance(oid, int) or oid <= 0:
+        return False, "identifiant d'ordre invalide", None
+    result_path = os.path.join(_PROC_RESULT_DIR, "result-%d.json" % oid)
+    try:
+        _process_write_request(order)
+    except OSError as exc:
+        return False, "depot de la demande impossible : %s" % exc, None
+    deadline = time.monotonic() + (_PROC_WAIT_SECONDS if timeout is None else timeout)
+    try:
+        while True:
+            try:
+                with open(result_path, "r", encoding="utf-8") as fh:
+                    res = json.load(fh)
+            except (OSError, ValueError):
+                res = None
+            if isinstance(res, dict) and res.get("nonce") == order.get("nonce"):
+                ev = res.get("evidence")
+                return bool(res.get("ok")), str(res.get("detail") or "")[:1500], (
+                    ev if isinstance(ev, dict) else None)
+            if time.monotonic() >= deadline:
+                return False, ("aucune reponse de cybersafe-process-apply (unite arretee ?) : "
+                               "rien n'est confirme"), None
+            time.sleep(0.5)
+    finally:
+        try:
+            os.unlink(os.path.join(_PROC_DIR, "request.json"))
+        except OSError:
+            pass
+
+
+def _report(api_url, token, order_id, success, detail, rule_present=None, evidence=None):
     payload = {"success": success, "detail": detail}
     if rule_present is not None:
         payload["rule_present"] = rule_present  # lu par le serveur (v1.8.1+)
+    if evidence is not None:
+        payload["evidence"] = evidence  # [R15-P2] preuve du processus (inspection ou avant action)
     try:
         requests.post(
             _result_url(api_url, order_id),
@@ -534,6 +603,14 @@ def _process_order(order, api_url, token):
             _report(api_url, token, oid, False,
                     "anti-lockout: IP d'une session SSH active, ban refuse")
             return
+
+    if action in PROCESS_ACTIONS:  # [R15-P2] unite root dediee, preuve renvoyee au serveur
+        ok, detail, evidence = _process_action(order)
+        logger.log(logging.INFO if ok else logging.WARNING,
+                   "[AUDIT] [remediation] order=%s %s %s -> %s (%s)",
+                   oid, action, ip, "OK" if ok else "FAIL", detail)
+        _report(api_url, token, oid, ok, detail, evidence=evidence)
+        return
 
     fw = _detect_firewall()
     iso_rule = None  # [R14-P2] constat de l'isolation

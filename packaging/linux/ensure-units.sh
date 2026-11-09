@@ -20,6 +20,14 @@
 #   - horodatage dans /var/lib/cybersafe-isolation (root) : sans lui, l'agent
 #     refuse toute isolation.
 #
+# US-SOC-R15 porte 2 : cybersafe-process-apply (reponse sur processus suspects).
+#   - le service de remediation (non privilegie) depose l'ordre SIGNE dans
+#     /var/lib/cybersafe/process/request.json ;
+#   - cybersafe-process-apply.path lance cybersafe-process-apply.service (root,
+#     capacites CAP_KILL / CAP_SYS_PTRACE / CAP_DAC_READ_SEARCH, aucun reseau) qui
+#     re-verifie la signature, l'expiration et le nonce, re-identifie le processus
+#     par son empreinte et agit par pidfd ; resultat dans /var/lib/cybersafe-process.
+#
 set -euo pipefail
 
 log(){ echo "[ensure-units] $*"; }
@@ -58,6 +66,10 @@ fi
 # [R14-P2] etat d'isolation (service) et horodatage du minuteur (root).
 install -d -o cybersafe -g cybersafe -m 0750 /var/lib/cybersafe/isolation
 install -d -o root -g root -m 0755 /var/lib/cybersafe-isolation
+
+# [R15-P2] demande (service) et resultats + journal anti-rejeu (root, lisibles par l'agent).
+install -d -o cybersafe -g cybersafe -m 0750 /var/lib/cybersafe/process
+install -d -o root -g cybersafe -m 0750 /var/lib/cybersafe-process
 
 # --- Unites ---------------------------------------------------------------------
 PROXY_SERVICE="$(cat <<'EOF'
@@ -150,10 +162,66 @@ WantedBy=timers.target
 EOF
 )"
 
+# [R15-P2] reponse sur processus : root a capacites reduites, sans reseau.
+PROCESS_SERVICE="$(cat <<'EOF'
+[Unit]
+Description=Cybersafe-AI - reponse sur processus suspects (inspection, gel, arret)
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+ConditionPathExists=/opt/cybersafe-agent/venv/bin/python
+
+[Service]
+Type=oneshot
+# root (capacites reduites) : lit /proc de tous les processus, signale par pidfd.
+# Re-verifie integralement l'ordre signe : le service de remediation n'est qu'un messager.
+User=root
+WorkingDirectory=/opt/cybersafe-agent
+ExecStart=/opt/cybersafe-agent/venv/bin/python -m cybersafe_agent.process_apply
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cybersafe-process-apply
+TimeoutStartSec=120
+CapabilityBoundingSet=CAP_KILL CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/cybersafe-process
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+MemoryMax=256M
+TasksMax=16
+EOF
+)"
+
+PROCESS_PATH="$(cat <<'EOF'
+[Unit]
+Description=Cybersafe-AI - surveillance des demandes de reponse sur processus
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+
+[Path]
+PathChanged=/var/lib/cybersafe/process/request.json
+Unit=cybersafe-process-apply.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)"
+
 write_unit /etc/systemd/system/cybersafe-proxy-apply.service "${PROXY_SERVICE}"
 write_unit /etc/systemd/system/cybersafe-proxy-apply.path "${PROXY_PATH}"
 write_unit /etc/systemd/system/cybersafe-isolation-guard.service "${GUARD_SERVICE}"
 write_unit /etc/systemd/system/cybersafe-isolation-guard.timer "${GUARD_TIMER}"
+write_unit /etc/systemd/system/cybersafe-process-apply.service "${PROCESS_SERVICE}"
+write_unit /etc/systemd/system/cybersafe-process-apply.path "${PROCESS_PATH}"
 
 if [ "${CHANGED}" = "1" ]; then
   systemctl daemon-reload
@@ -162,4 +230,6 @@ systemctl enable cybersafe-proxy-apply.path >/dev/null 2>&1 || log "enable du .p
 systemctl start cybersafe-proxy-apply.path >/dev/null 2>&1 || log "demarrage du .path differe."
 systemctl enable cybersafe-isolation-guard.timer >/dev/null 2>&1 || log "enable du minuteur d'isolation differe."
 systemctl start cybersafe-isolation-guard.timer >/dev/null 2>&1 || log "demarrage du minuteur d'isolation differe."
+systemctl enable cybersafe-process-apply.path >/dev/null 2>&1 || log "enable du .path processus differe."
+systemctl start cybersafe-process-apply.path >/dev/null 2>&1 || log "demarrage du .path processus differe."
 log "Unites a jour."
