@@ -581,13 +581,21 @@ def _process_order(order, api_url, token):
     _report(api_url, token, oid, ok, detail, rule_present=rule)
 
 
+def _pull_headers(token):
+    """[R14-P4] En-tetes du releve d'ordres, dont l'etat d'isolation constate localement."""
+    headers = {"X-Agent-Token": token, "User-Agent": "Cybersafe-Agent/remediation"}
+    state = isolation.reported_state()
+    if state:
+        headers["X-Cybersafe-Isolation"] = state
+    return headers
+
+
 def _poll_once(api_url, token):
     """Recupere les ordres pending et les traite. Best-effort."""
     try:
         r = requests.get(
             _orders_url(api_url),
-            headers={"X-Agent-Token": token,
-                     "User-Agent": "Cybersafe-Agent/remediation"},
+            headers=_pull_headers(token),
             timeout=_HTTP_TIMEOUT,
         )
         if r.status_code != 200:

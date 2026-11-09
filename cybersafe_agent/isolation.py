@@ -108,6 +108,20 @@ def is_isolated():
     return bool(isolation_jumps())
 
 
+def reported_state():
+    """[R14-P4] Etat signale au serveur a chaque releve : "isolated", "none" ou None (indetermine).
+
+    Le minuteur de securite peut retablir le reseau sans ordre : le serveur compare cet
+    etat a ce qu'il croit, et ne montre jamais « isole » un serveur qui ne l'est plus.
+    """
+    if not is_linux():
+        return None
+    try:
+        return "isolated" if is_isolated() else "none"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # --- Entrees ----------------------------------------------------------------------
 
 def parse_preserve(raw):

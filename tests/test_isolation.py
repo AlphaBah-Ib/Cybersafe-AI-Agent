@@ -357,3 +357,50 @@ class TestService:
         monkeypatch.setattr(r.isolation, "write_heartbeat", lambda: beats.append(1))
         r._poll_once("https://x", "t")
         assert beats == [1]
+
+
+# --- [R14-P4] etat d'isolation signale au serveur ------------------------------------------
+
+class TestEtatSignale:
+    def test_isole(self, net):
+        iso.isolate(order(), "https://x", 60, now=NOW)
+        assert iso.reported_state() == "isolated"
+
+    def test_non_isole(self, net):
+        assert iso.reported_state() == "none"
+
+    def test_apres_restauration_par_le_minuteur(self, net):
+        iso.isolate(order(), "https://x", 60, now=NOW)
+        assert iso.guard_tick(now=NOW + 400) == "restored"
+        assert iso.reported_state() == "none"
+
+    def test_indetermine_hors_linux_ou_en_erreur(self, net, monkeypatch):
+        monkeypatch.setattr(iso, "is_linux", lambda: False)
+        assert iso.reported_state() is None
+        monkeypatch.setattr(iso, "is_linux", lambda: True)
+        monkeypatch.setattr(iso, "is_isolated", lambda: 1 / 0)
+        assert iso.reported_state() is None
+
+    def test_entete_du_releve(self, monkeypatch):
+        seen = []
+
+        class Resp:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"orders": []}
+
+        def fake_get(url, headers=None, timeout=None):
+            seen.append(dict(headers))
+            return Resp()
+
+        monkeypatch.setattr(r.requests, "get", fake_get)
+        monkeypatch.setattr(r.isolation, "write_heartbeat", lambda: None)
+        monkeypatch.setattr(r.isolation, "reported_state", lambda: "isolated")
+        r._poll_once("https://x", "t")
+        monkeypatch.setattr(r.isolation, "reported_state", lambda: None)
+        r._poll_once("https://x", "t")
+        assert seen[0]["X-Cybersafe-Isolation"] == "isolated"
+        assert seen[0]["X-Agent-Token"] == "t"
+        assert "X-Cybersafe-Isolation" not in seen[1]
