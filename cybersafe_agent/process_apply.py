@@ -104,7 +104,7 @@ def execute(order):
     """Ordre deja verifie -> (ok, detail, preuve)."""
     action = order["action"]
     if action == "inspect_process":
-        return ops.inspect(order["target_ip"])
+        return ops.inspect(order["target_ip"], order.get("params"))  # [R15-P3] hunt
     return ops.act(action, order["params"]["fingerprint"])
 
 

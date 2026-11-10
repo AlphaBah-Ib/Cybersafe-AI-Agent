@@ -361,6 +361,67 @@ class TestUniteRoot:
         assert pa.apply_once() is None
 
 
+# --- [R15-P3] Recherche des relances -------------------------------------------------------
+
+def hunt_params(ev, started_after, **kw):
+    p = {"exe": ev["exe"], "exe_sha256": ev["exe_sha256"], "cmdline_sha256": ev["cmdline_sha256"],
+         "started_after": int(started_after)}
+    p.update(kw)
+    return p
+
+
+class TestRecherche:
+    def test_garde(self, key, tmp_path):
+        p = {"exe": "/tmp/.x/miner", "exe_sha256": "a" * 64, "cmdline_sha256": "b" * 64, "started_after": 1}
+        g.guard_order(signed(key, action="inspect_process", target_ip="hunt:17", params=p),
+                      g.ReplayJournal(str(tmp_path)))
+        g.guard_order(signed(key, action="inspect_process", target_ip="hunt:17", params=dict(p, exe_sha256="")),
+                      g.ReplayJournal(str(tmp_path)))
+        for bad in ({}, dict(p, extra=1), dict(p, cmdline_sha256=""), dict(p, exe_sha256="x"),
+                    dict(p, started_after=-1), dict(p, started_after="1"), dict(p, exe="")):
+            with pytest.raises(g.OrderRejected):
+                g.guard_order(signed(key, action="inspect_process", target_ip="hunt:17", params=bad),
+                              g.ReplayJournal(str(tmp_path)))
+        for target in ("hunt:0", "hunt:x", "hunt:17 "):
+            with pytest.raises(g.OrderRejected):
+                g.guard_order(signed(key, action="inspect_process", target_ip=target, params=p),
+                              g.ReplayJournal(str(tmp_path)))
+
+    def test_relance_trouvee(self, sleeper):
+        before = time.time() - 30
+        p = sleeper(4243)
+        ev = ops.capture(p.pid)
+        ok, detail, found = ops.inspect("hunt:17", hunt_params(ev, before))
+        assert ok and found["pid"] == p.pid and "1 instance(s) relancee(s)" in detail
+
+    def test_instance_anterieure_non_comptee(self, sleeper):
+        p = sleeper(4244)
+        ev = ops.capture(p.pid)
+        ok, detail, found = ops.inspect("hunt:17", hunt_params(ev, time.time() + 60))
+        assert ok and found is None and "1 instance(s) identique(s) anterieure(s)" in detail
+
+    def test_autre_commande_ou_autre_binaire(self, sleeper):
+        p = sleeper(4245)
+        ev = ops.capture(p.pid)
+        assert ops.inspect("hunt:17", hunt_params(ev, 0, cmdline_sha256="c" * 64))[2] is None
+        assert ops.inspect("hunt:17", hunt_params(ev, 0, exe_sha256="d" * 64))[2] is None
+
+    def test_par_chemin_si_hash_absent(self, sleeper):
+        p = sleeper(4246)
+        ev = ops.capture(p.pid)
+        assert ops.inspect("hunt:17", hunt_params(ev, 0, exe_sha256=""))[2]["pid"] == p.pid
+        assert ops.inspect("hunt:17", hunt_params(ev, 0, exe_sha256="", exe="/autre/sleep"))[2] is None
+
+    def test_unite_root(self, key, unit, sleeper):
+        p = sleeper(4247)
+        ev = ops.capture(p.pid)
+        unit.write_text(json.dumps({"order": signed(key, action="inspect_process", target_ip="hunt:17",
+                                                    params=hunt_params(ev, 0))}))
+        res = pa.apply_once()
+        assert res["ok"] and res["evidence"]["pid"] == p.pid
+        assert p.poll() is None  # lecture seule
+
+
 # --- Service de remediation (messager) -----------------------------------------------------
 
 @pytest.fixture

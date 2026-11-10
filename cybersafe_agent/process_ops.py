@@ -432,12 +432,80 @@ def act(action, fp):
         os.close(pidfd)
 
 
-def inspect(target):
-    """INSPECT_PROCESS : « port:<n> » ou « pid:<n> » -> (ok, detail, preuve)."""
-    m = re.match(r"^(port|pid):([1-9][0-9]{0,6})$", str(target or ""))
+def _boot_time():
+    with open(os.path.join(PROC, "stat"), "r", encoding="ascii", errors="replace") as fh:
+        for line in fh:
+            if line.startswith("btime "):
+                return int(line.split()[1])
+    raise ProcessError("heure de demarrage du systeme illisible")
+
+
+def hunt(exe, exe_sha, cmd_sha, started_after):
+    """
+    [R15-P3] Instances du MEME processus (meme ligne de commande ET meme executable : hash,
+    ou chemin si le hash n'avait pas pu etre calcule) demarrees APRES started_after (epoch).
+    Lecture seule. Renvoie (ok, detail, preuve de la plus ancienne relance ou None).
+    """
+    try:
+        btime, clk = _boot_time(), os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, ProcessError) as exc:
+        return False, "recherche impossible (%s)" % exc, None
+    hashes = {}
+    found, older = [], 0
+    me = os.getpid()
+    for name in os.listdir(PROC):
+        if not name.isdigit() or int(name) == me:
+            continue
+        pid = int(name)
+        try:
+            raw = _read_bytes(_path(pid, "cmdline"), 1024 * 1024)
+        except OSError:
+            continue
+        if not raw or hashlib.sha256(raw).hexdigest() != cmd_sha:
+            continue
+        if exe_sha:
+            try:
+                st = os.stat(_path(pid, "exe"))
+            except OSError:
+                continue
+            key = (st.st_dev, st.st_ino)
+            if key not in hashes:
+                hashes[key] = exe_sha256(pid)
+            if hashes[key] != exe_sha:
+                continue
+        elif server_text(_readlink(pid, "exe")) != exe:
+            continue
+        try:
+            _, state, _, start = read_stat(pid)
+        except ProcessError:
+            continue
+        if state == "Z":
+            continue
+        if btime + int(start) / clk < started_after:
+            older += 1
+            continue
+        found.append((int(start), pid))
+    note = (" %d instance(s) identique(s) anterieure(s) a l'action, non comptee(s)." % older) if older else ""
+    if not found:
+        return True, "aucune instance relancee depuis l'action.%s" % note, None
+    found.sort()
+    try:
+        ev = capture(found[0][1])
+    except ProcessError as exc:
+        return False, "%d instance(s) relancee(s) mais releve impossible (%s)" % (len(found), exc), None
+    return True, ("%d instance(s) relancee(s) (PID %s).%s"
+                  % (len(found), ", ".join(str(p) for _, p in found[:10]), note)), ev
+
+
+def inspect(target, params=None):
+    """INSPECT_PROCESS : « port:<n> », « pid:<n> » ou « hunt:<preuve> » -> (ok, detail, preuve)."""
+    m = re.match(r"^(port|pid|hunt):([1-9][0-9]{0,11})$", str(target or ""))
     if not m:
         return False, "cible d'inspection invalide : %r" % (target,), None
     kind, num = m.group(1), int(m.group(2))
+    if kind == "hunt":  # [R15-P3] parametres deja verifies (signes) par order_guard
+        p = params or {}
+        return hunt(p.get("exe"), p.get("exe_sha256"), p.get("cmdline_sha256"), p.get("started_after"))
     try:
         if kind == "port":
             pid, sharing = find_listener(num)

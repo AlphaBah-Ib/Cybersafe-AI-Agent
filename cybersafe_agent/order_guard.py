@@ -78,6 +78,16 @@ PARAM_SPECS = {
     "kill_process": {"justification": ("str", 10, 500), "fingerprint": ("fingerprint",)},
     "release_process": {"fingerprint": ("fingerprint",)},
 }
+# [R15-P3] recherche des relances (inspect_process sur « hunt:<preuve> ») : executable,
+# hashes et date de debut minimale, signes par le serveur. Lecture seule.
+HUNT_PARAM_SPEC = {"exe": ("str", 1, 1024), "exe_sha256": ("hex64", True),
+                   "cmdline_sha256": ("hex64", False), "started_after": (0, 2 ** 40)}
+
+
+def _param_spec(order):
+    if order.get("action") == "inspect_process" and str(order.get("target_ip") or "").startswith("hunt:"):
+        return HUNT_PARAM_SPEC
+    return PARAM_SPECS.get(order.get("action"), {})
 CLOCK_TOLERANCE_SECONDS = 60
 _DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _FORBIDDEN_IP_KINDS = (
@@ -214,7 +224,7 @@ def _check_cidrs(name, value, hi):
             raise OrderRejected("parametre %s : reseau trop large %s" % (name, net))
 
 
-_PROC_SELECTOR_RE = re.compile(r"^(port|pid):([1-9][0-9]{0,6})$")  # [R15-P2]
+_PROC_SELECTOR_RE = re.compile(r"^(port|pid|hunt):([1-9][0-9]{0,11})$")  # [R15-P2] [R15-P3] hunt
 _PROC_EVIDENCE_RE = re.compile(r"^proc:[1-9][0-9]{0,11}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -364,7 +374,7 @@ def check_params(order):
         raise OrderRejected("parametres illisibles")
     if order.get("action") == "restore_network":  # [R14-P2] parametres inutilises : une
         return                                    # restauration n'est jamais bloquee par eux
-    spec = PARAM_SPECS.get(order.get("action"), {})
+    spec = _param_spec(order)  # [R15-P3]
     if (params or spec) and order.get("sig_alg") != SIG_V2:
         raise OrderRejected("parametres non signes (signature v2 exigee)")
     unknown = sorted(set(params) - set(spec))
@@ -377,6 +387,10 @@ def check_params(order):
             continue
         if bounds[0] == "fingerprint":  # [R15-P2] empreinte signee du processus
             check_fingerprint(name, value)
+            continue
+        if bounds[0] == "hex64":  # [R15-P3] ("hex64", vide admis)
+            if not isinstance(value, str) or not (_HEX64_RE.match(value) or (bounds[1] and value == "")):
+                raise OrderRejected("parametre %s : hash invalide" % name)
             continue
         if len(bounds) == 3:  # texte : ("str", longueur min, longueur max)
             _, lo, hi = bounds
