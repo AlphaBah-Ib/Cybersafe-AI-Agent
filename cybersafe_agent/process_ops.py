@@ -316,8 +316,16 @@ def find_listener(port):
     if not owners:
         raise ProcessError("port %d en ecoute mais processus proprietaire introuvable "
                            "(conteneur ou droits insuffisants)" % port)
-    owners.sort()
-    return owners[0][1], len(owners)   # le plus ancien (processus maitre), nombre de partageurs
+    return pick_owner(owners), len(owners)
+
+
+def pick_owner(owners):
+    """[R15-P5] Parmi (start_ticks, pid) partageant un port : le plus ancien HORS PID 1.
+    Avec l'activation de socket systemd (ssh.socket...), PID 1 detient aussi le port :
+    on releve le processus de service (sshd...), plus utile a l'analyste."""
+    ordered = sorted(owners)
+    services = [o for o in ordered if o[1] != 1]
+    return (services or ordered)[0][1]
 
 
 def server_text(value):
@@ -510,7 +518,7 @@ def inspect(target, params=None):
         if kind == "port":
             pid, sharing = find_listener(num)
             ev = capture(pid, listen_port=num)
-            extra = (" %d processus partagent ce port (le plus ancien est releve)." % sharing
+            extra = (" %d processus partagent ce port (processus de service releve, hors PID 1)." % sharing
                      if sharing > 1 else "")
         else:
             ev = capture(num)

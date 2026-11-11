@@ -186,6 +186,12 @@ class TestReleve:
         assert ok and ev["pid"] == p.pid and ev["listen_port"] == port
         assert any(c["state"] == "LISTEN" and c["local"].endswith(":%d" % port) for c in ev["connections"])
 
+    def test_port_partage_hors_pid1(self):
+        """[R15-P5] activation de socket : PID 1 et sshd partagent le port 22."""
+        assert ops.pick_owner([(10, 1), (500, 812)]) == 812
+        assert ops.pick_owner([(500, 900), (300, 812), (10, 1)]) == 812
+        assert ops.pick_owner([(10, 1)]) == 1
+
     def test_port_sans_ecoute(self):
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
