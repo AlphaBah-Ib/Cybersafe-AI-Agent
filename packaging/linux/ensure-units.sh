@@ -71,6 +71,15 @@ install -d -o root -g root -m 0755 /var/lib/cybersafe-isolation
 install -d -o cybersafe -g cybersafe -m 0750 /var/lib/cybersafe/process
 install -d -o root -g cybersafe -m 0750 /var/lib/cybersafe-process
 
+# [CERT04-P2] certificats geres : demande (service), resultats + journal anti-rejeu
+# (root, lisibles par l'agent), magasin ACME (root seul), webroot HTTP-01 (lisible
+# par le serveur web), magasin des certificats (root seul).
+install -d -o cybersafe -g cybersafe -m 0750 /var/lib/cybersafe/cert
+install -d -o root -g cybersafe -m 0750 /var/lib/cybersafe-cert
+install -d -o root -g root -m 0700 /var/lib/cybersafe-acme
+install -d -o root -g root -m 0755 /var/lib/cybersafe-acme-webroot
+install -d -o root -g root -m 0700 /etc/cybersafe/certs
+
 # --- Unites ---------------------------------------------------------------------
 PROXY_SERVICE="$(cat <<'EOF'
 [Unit]
@@ -216,12 +225,124 @@ WantedBy=multi-user.target
 EOF
 )"
 
+# [CERT04-P2] service des certificats : NON privilegie, aucune capability.
+CERT_SERVICE="$(cat <<'EOF'
+[Unit]
+Description=Cybersafe-AI - certificats geres (releve des ordres signes, remontee)
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/cybersafe-agent/venv/bin/python
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cybersafe
+Group=cybersafe
+WorkingDirectory=/opt/cybersafe-agent
+EnvironmentFile=-/etc/cybersafe/agent.env
+ExecStart=/opt/cybersafe-agent/venv/bin/python -m cybersafe_agent.cert_service
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cybersafe-cert
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cybersafe
+ReadOnlyPaths=/etc/cybersafe /var/lib/cybersafe-cert
+InaccessiblePaths=-/etc/cybersafe/certs -/var/lib/cybersafe-acme
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=128M
+CPUQuota=20%
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)"
+
+# [CERT04-P2] execution root des ordres de certificats (reverifies integralement).
+# Reseau requis (ACME, verification HTTPS) ; ecriture limitee aux magasins et aux
+# configurations des serveurs web (porte 3).
+CERT_APPLY_SERVICE="$(cat <<'EOF'
+[Unit]
+Description=Cybersafe-AI - emission et installation des certificats geres
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+ConditionPathExists=/opt/cybersafe-agent/venv/bin/python
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/cybersafe-agent
+ExecStart=/opt/cybersafe-agent/venv/bin/python -m cybersafe_agent.cert_apply
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cybersafe-cert-apply
+TimeoutStartSec=900
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cybersafe-cert /var/lib/cybersafe-acme /var/lib/cybersafe-acme-webroot /etc/cybersafe/certs /run
+ReadWritePaths=-/etc/nginx -/etc/apache2 -/etc/httpd
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+MemoryMax=256M
+TasksMax=32
+EOF
+)"
+
+CERT_APPLY_PATH="$(cat <<'EOF'
+[Unit]
+Description=Cybersafe-AI - surveillance des demandes de certificats
+Documentation=https://github.com/AlphaBah-Ib/Cybersafe-AI-Agent
+
+[Path]
+PathChanged=/var/lib/cybersafe/cert/request.json
+Unit=cybersafe-cert-apply.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)"
+
 write_unit /etc/systemd/system/cybersafe-proxy-apply.service "${PROXY_SERVICE}"
 write_unit /etc/systemd/system/cybersafe-proxy-apply.path "${PROXY_PATH}"
 write_unit /etc/systemd/system/cybersafe-isolation-guard.service "${GUARD_SERVICE}"
 write_unit /etc/systemd/system/cybersafe-isolation-guard.timer "${GUARD_TIMER}"
 write_unit /etc/systemd/system/cybersafe-process-apply.service "${PROCESS_SERVICE}"
 write_unit /etc/systemd/system/cybersafe-process-apply.path "${PROCESS_PATH}"
+write_unit /etc/systemd/system/cybersafe-cert.service "${CERT_SERVICE}"
+write_unit /etc/systemd/system/cybersafe-cert-apply.service "${CERT_APPLY_SERVICE}"
+write_unit /etc/systemd/system/cybersafe-cert-apply.path "${CERT_APPLY_PATH}"
 
 if [ "${CHANGED}" = "1" ]; then
   systemctl daemon-reload
@@ -232,4 +353,9 @@ systemctl enable cybersafe-isolation-guard.timer >/dev/null 2>&1 || log "enable 
 systemctl start cybersafe-isolation-guard.timer >/dev/null 2>&1 || log "demarrage du minuteur d'isolation differe."
 systemctl enable cybersafe-process-apply.path >/dev/null 2>&1 || log "enable du .path processus differe."
 systemctl start cybersafe-process-apply.path >/dev/null 2>&1 || log "demarrage du .path processus differe."
+systemctl enable cybersafe-cert-apply.path >/dev/null 2>&1 || log "enable du .path certificats differe."
+systemctl start cybersafe-cert-apply.path >/dev/null 2>&1 || log "demarrage du .path certificats differe."
+# enable --now : demarre s'il ne tourne pas. Le redemarrage apres mise a jour du
+# code est fait par update-agent.sh (enable --now ne relance pas un service actif).
+systemctl enable --now cybersafe-cert.service >/dev/null 2>&1 || log "demarrage du service certificats differe."
 log "Unites a jour."
