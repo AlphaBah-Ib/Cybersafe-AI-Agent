@@ -310,7 +310,7 @@ class FakeWebconf:
         if self.install_error:
             raise RuntimeError(self.install_error)
 
-    def verify_https(self, names, leaf):
+    def verify_https(self, names, leaf, plan):
         self.calls.append("verify")
 
     def restore(self, *a):

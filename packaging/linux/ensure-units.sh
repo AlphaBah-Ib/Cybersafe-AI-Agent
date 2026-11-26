@@ -303,6 +303,8 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/cybersafe-cert /var/lib/cybersafe-acme /var/lib/cybersafe-acme-webroot /etc/cybersafe/certs /run
 ReadWritePaths=-/etc/nginx -/etc/apache2 -/etc/httpd
+# nginx -t / apachectl configtest ouvrent les journaux et dossiers temporaires en ecriture.
+ReadWritePaths=-/var/log/nginx -/var/lib/nginx -/var/log/apache2 -/var/log/httpd
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ProtectKernelTunables=true
 ProtectKernelModules=true

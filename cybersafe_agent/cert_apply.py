@@ -20,7 +20,7 @@ Types d'ordre :
                     approuvee (signee), emission ACME, installation, verification
                     HTTPS, retour arriere automatique en cas d'echec.
 L'analyse et l'installation sur le serveur web sont fournies par cert_webconf
-(porte 3) ; sans ce module, les ordres sont refuses proprement.
+(porte 3).
 
     python -m cybersafe_agent.cert_apply
 """
@@ -153,12 +153,15 @@ def do_issue_install(order, webconf, certs_root=cert_store.CERTS_ROOT, issuer=ce
         cert_pem, chain_pem = cert_store.store_certificate(vdir, leaf, chain, names)
     except Exception:
         cert_store.discard(vdir)
+        # la configuration revient a son etat d'origine : une nouvelle tentative
+        # retrouvera la meme empreinte de plan (pas de nouvelle approbation)
+        webconf.restore(order["web_server"], cid)
         raise
     # 4. activation + installation + verification HTTPS ; sinon retour arriere complet
     previous = cert_store.activate(vdir)
     try:
         webconf.install(order["web_server"], names, cid, plan)
-        webconf.verify_https(names, leaf)
+        webconf.verify_https(names, leaf, plan)
     except Exception as exc:
         # Renouvellement : l'ancien certificat d'abord, puis l'ancienne configuration
         # (rechargee par restore). Premiere installation : la configuration d'abord,
@@ -196,7 +199,8 @@ def execute(order, journal, webconf=None, **kw):
         if order["kind"] == "plan":
             return do_plan(order, webconf)
         return do_issue_install(order, webconf, **kw)
-    except (cert_acme.AcmeError, cert_store.StoreError) as exc:
+    except (cert_acme.AcmeError, cert_store.StoreError,
+            getattr(webconf, "WebconfError", cert_store.StoreError)) as exc:
         return _fail(oid, str(exc))
     except Exception as exc:  # noqa: BLE001 — jamais de trace brute vers le serveur
         logger.exception("[cert] erreur inattendue (ordre %s)", oid)

@@ -100,11 +100,29 @@ def lego_command(exe, directory, csr_path, data_dir=LEGO_DATA, webroot=WEBROOT):
             "--http", "--http.webroot", webroot, "run"]
 
 
+def ensure_webroot(webroot=WEBROOT):
+    """Dossiers HTTP-01 lisibles par le serveur web (qui ne tourne pas en root).
+    Droits EXPLICITES : cert_apply tourne sous umask 077, qui donnerait 0700 et un
+    refus 403 a chaque validation."""
+    path = webroot
+    for part in ("", ".well-known", "acme-challenge"):
+        path = os.path.join(path, part) if part else path
+        os.makedirs(path, exist_ok=True)
+        os.chmod(path, 0o755)
+    return path
+
+
 def _prepare_dirs(data_dir, webroot):
     for path, mode in ((ACME_HOME, 0o700), (data_dir, 0o700)):
         os.makedirs(path, mode=mode, exist_ok=True)
         os.chmod(path, mode)
-    os.makedirs(os.path.join(webroot, ".well-known", "acme-challenge"), mode=0o755, exist_ok=True)
+    ensure_webroot(webroot)
+
+
+def _lego_umask():
+    # lego ecrit les jetons HTTP-01 avec les droits par defaut : umask 022 pour qu'ils
+    # soient lisibles par le serveur web (les donnees du compte restent dans un dossier 0700).
+    os.umask(0o022)
 
 
 def _result_file(data_dir, primary):
@@ -130,7 +148,8 @@ def issue(directory, csr_path, hostnames, *, lego_path=LEGO_PATH, data_dir=LEGO_
         try:
             proc = runner(lego_command(exe, directory, csr_path, data_dir, webroot),
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
-                          timeout=RUN_TIMEOUT, pass_fds=(fd,), check=False)
+                          timeout=RUN_TIMEOUT, pass_fds=(fd,), check=False,
+                          preexec_fn=_lego_umask)
         except subprocess.TimeoutExpired:
             raise AcmeError("l'autorite de certification n'a pas repondu a temps") from None
     finally:
