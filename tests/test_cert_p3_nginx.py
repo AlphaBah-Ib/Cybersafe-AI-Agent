@@ -29,6 +29,17 @@ NAMES = ["client-a.fr", "www.client-a.fr"]
 SHA_ANY = "a" * 64
 
 
+def wait_ports_free(timeout=15.0):
+    """Le serveur arrete libere 80/443 avec un leger delai : le banc suivant ne doit
+    pas demarrer avant (sinon echec intermittent au demarrage)."""
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _port_free(80) and _port_free(443):
+            return
+        time.sleep(0.2)
+
+
 def _port_free(port):
     s = socket.socket()
     try:
@@ -135,6 +146,7 @@ class Bench:
         if self.running:
             subprocess.run(self.base + ("-s", "stop"), check=False)
             self.running = False
+            wait_ports_free()
 
     def snapshot(self):
         return {f: open(os.path.join(self.sites, f)).read() for f in sorted(os.listdir(self.sites))}
@@ -413,10 +425,6 @@ class TestRefusals:
         monkeypatch.setattr(b.env, "panel_markers", (b.tmp,))
         with pytest.raises(wc.WebconfError, match="Panneau"):
             wc.compute_plan("nginx", NAMES, 3)
-
-    def test_apache_not_yet(self, b):
-        with pytest.raises(wc.WebconfError, match="Apache"):
-            wc.compute_plan("apache", NAMES, 3)
 
     def test_plan_sensitive_to_any_change(self, b):
         p = b.site("a.conf", HTTP_SITE % b.tmp)

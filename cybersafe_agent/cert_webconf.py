@@ -18,7 +18,7 @@ Principes :
   - chaque phase : sauvegarde, ecriture atomique, `nginx -t`, rechargement
     (reload, jamais restart) ; au moindre echec, restauration puis nouveau test ;
   - au moindre doute, refus explicite (WebconfError) sans rien modifier.
-Nginx uniquement dans cette version ; Apache arrive a la porte 3b.
+Nginx et Apache 2.4 (Debian / Ubuntu : apache2, apachectl, sites-enabled).
 """
 import difflib
 import hashlib
@@ -32,6 +32,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import cert_store
+from .apache_conf import ApacheConfError, ApacheConfig
 from .nginx_conf import NginxConfError, NginxConfig
 
 MARK = "# cybersafe-ai"
@@ -55,6 +56,12 @@ class Env:
     panel_markers: tuple = ("/usr/local/psa", "/usr/local/cpanel", "/usr/local/directadmin")
     nginx_test_cmd: tuple = ("nginx", "-t", "-q")
     nginx_reload_cmd: tuple = ("systemctl", "reload", "nginx")
+    apache_main: str = "/etc/apache2/apache2.conf"
+    apache_server_root: str = None
+    apache_snippet_dir: str = "/etc/apache2/cybersafe"
+    apache_test_cmd: tuple = ("apachectl", "configtest")
+    apache_reload_cmd: tuple = ("systemctl", "reload", "apache2")
+    apache_modules_cmd: tuple = ("apachectl", "-M")
     https_port: int = 443
     verify_timeout: float = 15.0
 
@@ -349,9 +356,203 @@ def compute_plan(web_server, hostnames, cid, env=None):
     if web_server == "nginx":
         return _nginx_plan(env, hostnames, cid)
     if web_server == "apache":
-        raise WebconfError("Apache : pris en charge dans la prochaine version de l'agent.")
+        return _apache_plan(env, hostnames, cid)
     raise WebconfError("Service web non pris en charge.")
 
+
+
+# --- analyse Apache ---------------------------------------------------------------
+_REDIRECTS = ("redirect", "redirectmatch", "redirectpermanent", "redirecttemp")
+
+
+def _vhost_addr(arg):
+    """(port, host) d'une adresse de <VirtualHost>."""
+    if arg.startswith("["):
+        host, _, rest = arg[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") else ""
+    elif ":" in arg:
+        host, _, port = arg.rpartition(":")
+    else:
+        host, port = arg, ""
+    if host in ("*", "_default_", "", "::", "0.0.0.0"):
+        host = None
+    return (int(port) if port.isdigit() else 80), host
+
+
+class _VHost:
+    def __init__(self, st):
+        self.st = st
+        self.addrs = [_vhost_addr(a) for a in st.args]
+        self.names, self.ssl_engine, self.redirects = [], False, False
+        self.ssl_cert_stmts, self.includes, self.has_challenge = [], set(), False
+        rewrite_on = False
+        for ch in st.block:  # directives propres au vhost
+            if ch.name == "servername" and ch.args:
+                self.names.append(ch.args[0].lower().split(":")[0])
+            elif ch.name == "serveralias":
+                self.names += [a.lower() for a in ch.args]
+            elif ch.name in ("include", "includeoptional") and ch.args:
+                self.includes.add(ch.args[0])
+        for ch in ApacheConfig.children(st.block):
+            if ch.name == "sslengine" and ch.args and ch.args[0].lower() == "on":
+                self.ssl_engine = True
+            elif ch.name in _REDIRECTS:
+                self.redirects = True
+            elif ch.name == "rewriteengine" and ch.args and ch.args[0].lower() == "on":
+                rewrite_on = True
+            elif ch.name == "rewriterule" and rewrite_on:
+                self.redirects = True
+            elif ch.name in ("sslcertificatefile", "sslcertificatekeyfile",
+                             "sslcertificatechainfile"):
+                self.ssl_cert_stmts.append(ch)
+            elif ch.name in ("alias", "aliasmatch") and any("acme-challenge" in a for a in ch.args):
+                self.has_challenge = True
+            elif ch.name == "include" and ch.args and "letsencrypt" in ch.args[0]:
+                self.ssl_cert_stmts.append(ch)
+
+    @property
+    def https(self):
+        return self.ssl_engine and any(p == 443 for p, _h in self.addrs)
+
+    @property
+    def port443_without_ssl(self):
+        return not self.ssl_engine and any(p == 443 for p, _h in self.addrs)
+
+    @property
+    def http(self):
+        return any(p == 80 for p, _h in self.addrs) and not self.ssl_engine
+
+    def https_host(self):
+        for p, h in self.addrs:
+            if p == 443 and h and h.replace(".", "").isdigit():
+                return h
+        return "127.0.0.1"
+
+
+def _apache_snippets(env, cid):
+    challenge = os.path.join(env.apache_snippet_dir, "acme-challenge.conf")
+    certconf = os.path.join(env.apache_snippet_dir, "certs", "%d.conf" % cid)
+    live = os.path.join(cert_store.cert_dir(cid, env.certs_root), "current")
+    wk = os.path.join(env.webroot, ".well-known", "acme-challenge") + "/"
+    return {
+        challenge: (
+            "# Gere par Cybersafe-AI : validation HTTP-01 des certificats geres. Ne pas modifier.\n"
+            "# Une RewriteRule du site serait evaluee avant l'Alias : on laisse passer ce chemin.\n"
+            "<IfModule mod_rewrite.c>\n"
+            "    RewriteEngine On\n"
+            "    RewriteRule ^/\\.well-known/acme-challenge/ - [L]\n"
+            "</IfModule>\n"
+            "Alias /.well-known/acme-challenge/ \"%s\"\n"
+            "<Directory \"%s\">\n"
+            "    Options None\n"
+            "    AllowOverride None\n"
+            "    Require all granted\n"
+            "</Directory>\n" % (wk, wk)),
+        certconf: (
+            "# Gere par Cybersafe-AI : certificat gere n. %d. Ne pas modifier.\n"
+            "SSLCertificateFile %s/fullchain.pem\n"
+            "SSLCertificateKeyFile %s/privkey.pem\n" % (cid, live, live)),
+    }, challenge, certconf
+
+
+def _apache_plan(env, names, cid):
+    names = sorted(names)
+    _refusal_checks(env, names)
+    if not os.path.isfile(env.apache_main):
+        raise WebconfError("Apache introuvable (%s). Seules les distributions Debian et Ubuntu "
+                           "sont prises en charge pour l'instant." % env.apache_main)
+    code, out = _run(env.apache_modules_cmd)
+    if code != 0 or "ssl_module" not in out:
+        raise WebconfError("Le module SSL d'Apache n'est pas active : lancez `a2enmod ssl` puis "
+                           "`systemctl restart apache2`, et relancez l'analyse.")
+    try:
+        conf = ApacheConfig(env.apache_main, env.apache_server_root)
+    except ApacheConfError as exc:
+        raise WebconfError("Configuration Apache illisible : %s" % exc) from None
+
+    vhosts = [_VHost(v) for v in conf.vhosts()]
+    per_name = {}
+    for n in names:
+        per_name[n] = tuple(i for i, v in enumerate(vhosts) if n in v.names)
+        if not per_name[n]:
+            raise WebconfError("Aucun VirtualHost d'Apache ne declare explicitement %s "
+                               "(ServerName / ServerAlias)." % n)
+    groups = set(per_name.values())
+    if len(groups) != 1:
+        raise WebconfError("Ces noms sont servis par des VirtualHost differents : commandez un "
+                           "certificat par groupe de noms servis ensemble.")
+    targets = [vhosts[i] for i in groups.pop()]
+    for v in targets:
+        extra = sorted(set(v.names) - set(names))
+        if extra:
+            raise WebconfError("Le VirtualHost (%s:%d) sert aussi %s : ajoutez ces noms a la "
+                               "commande, sinon leur HTTPS serait casse."
+                               % (v.st.file, v.st.line, ", ".join(extra[:5])))
+        if not v.st.block or v.st.block[0].line <= v.st.line:
+            raise WebconfError("VirtualHost au format inhabituel (%s:%d) : intervention refusee."
+                               % (v.st.file, v.st.line))
+        if v.port443_without_ssl:
+            raise WebconfError("Le VirtualHost *:443 (%s:%d) n'a pas `SSLEngine on` : "
+                               "intervention refusee." % (v.st.file, v.st.line))
+        for c in v.ssl_cert_stmts:
+            p = c.args[0] if c.args else ""
+            if p.startswith(env.letsencrypt_dir + "/") or "letsencrypt" in p or "/.acme.sh/" in p:
+                raise WebconfError("Le certificat actuel de %s est gere par certbot ou acme.sh : "
+                                   "reprise non proposee pour l'instant." % v.names[0])
+
+    https_v = [v for v in targets if v.https]
+    http_v = [v for v in targets if v.http]
+    if not https_v:
+        raise WebconfError("Aucun VirtualHost HTTPS (port 443) pour ces noms. Activez-en un "
+                           "d'abord (par exemple `a2ensite default-ssl` adapte a vos noms), puis "
+                           "relancez l'analyse.")
+    if len(https_v) > 1 or len(http_v) > 1:
+        raise WebconfError("Organisation des VirtualHost non prise en charge pour ces noms "
+                           "(un VirtualHost HTTP et/ou un VirtualHost HTTPS attendus).")
+
+    snippets, challenge_path, certconf_path = _apache_snippets(env, cid)
+    edits_a, edits_b = {}, {}
+
+    def insert(edits, v, lines):
+        first = v.st.block[0]
+        edits.setdefault(first.file, []).append(("ins", first.line, lines))
+
+    for v in targets:
+        if v.has_challenge and challenge_path not in v.includes:
+            raise WebconfError("Un Alias /.well-known/acme-challenge/ existe deja (%s:%d) : un "
+                               "autre outil semble gerer les certificats." % (v.st.file, v.st.line))
+        if (v.https or not v.redirects) and challenge_path not in v.includes:
+            # Apache n'accepte pas de commentaire en fin de ligne : marqueur au-dessus.
+            insert(edits_a, v, ["%s : validation HTTP-01" % MARK, "Include %s" % challenge_path])
+    tls = https_v[0]
+    if certconf_path not in tls.includes:
+        insert(edits_b, tls, ["%s : certificat gere" % MARK, "Include %s" % certconf_path])
+        for c in tls.ssl_cert_stmts:
+            if c.file != tls.st.file:
+                raise WebconfError("Le certificat actuel est defini dans un fichier partage (%s) : "
+                                   "intervention refusee." % c.file)
+            edits_b.setdefault(c.file, []).append(("com", c.line, None))
+
+    plan = Plan("apache", cid, names, https_addr=tls.https_host())
+    for path in sorted(set(edits_a) | set(edits_b)):
+        orig = conf.texts[path]
+        plan.originals[path] = orig
+        plan.phase_a[path] = _apply_edits(orig, edits_a.get(path, []))
+        plan.final[path] = _apply_edits(orig, edits_a.get(path, []) + edits_b.get(path, []))
+    for path, content in snippets.items():
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                cur = fh.read()
+        except FileNotFoundError:
+            cur = None
+        is_a = path == challenge_path
+        needed = bool(edits_a) if is_a else bool(edits_b)
+        if needed and cur != content:
+            plan.originals[path] = cur
+            plan.phase_a[path] = content if is_a else cur
+            plan.final[path] = content
+    _finish(plan)
+    return plan
 
 # --- application ----------------------------------------------------------------------
 def _manifest_path(env, cid):
@@ -415,13 +616,17 @@ def _restore_from(manifest):
                 pass
 
 
-def _test_and_reload(env):
-    code, out = _run(env.nginx_test_cmd)
+def _test_and_reload(env, web_server):
+    if web_server == "apache":
+        test, reload, label = env.apache_test_cmd, env.apache_reload_cmd, "Apache"
+    else:
+        test, reload, label = env.nginx_test_cmd, env.nginx_reload_cmd, "Nginx"
+    code, out = _run(test)
     if code != 0:
-        return "nginx -t a echoue : %s" % out.strip()[-600:]
-    code, out = _run(env.nginx_reload_cmd)
+        return "test de configuration %s en echec : %s" % (label, out.strip()[-600:])
+    code, out = _run(reload)
     if code != 0:
-        return "rechargement de Nginx en echec : %s" % out.strip()[-600:]
+        return "rechargement de %s en echec : %s" % (label, out.strip()[-600:])
     return None
 
 
@@ -445,8 +650,8 @@ def _apply_phase(env, plan, target, expected, phase):
         _save_manifest(env, plan.certificate_id, manifest)
         if phase == "B":
             # Renouvellement : la configuration ne change pas mais les fichiers du
-            # certificat (lien current) si ; Nginx ne les relit qu'au rechargement.
-            err = _test_and_reload(env)
+            # certificat (lien current) si ; le serveur ne les relit qu'au rechargement.
+            err = _test_and_reload(env, plan.web_server)
             if err:
                 raise WebconfError("Phase B : %s" % err)
         return
@@ -466,10 +671,10 @@ def _apply_phase(env, plan, target, expected, phase):
     for path, content in changes.items():
         like = os.stat(path) if os.path.exists(path) else None
         _atomic_write(path, content, like)
-    err = _test_and_reload(env)
+    err = _test_and_reload(env, plan.web_server)
     if err:
         _restore_from(manifest)
-        err2 = _test_and_reload(env)
+        err2 = _test_and_reload(env, plan.web_server)
         raise WebconfError("Phase %s annulee, configuration restauree : %s%s"
                            % (phase, err, "" if not err2 else " (ATTENTION : %s)" % err2))
 
@@ -495,9 +700,9 @@ def restore(web_server, cid, env=None):
     if manifest is not None:
         os.replace(_manifest_path(env, cid), _manifest_path(env, cid) + ".restored")
     # Toujours recharger : apres un retour arriere du lien current (renouvellement),
-    # Nginx doit relire l'ancien certificat meme si aucun fichier de configuration
-    # n'a change.
-    err = _test_and_reload(env)
+    # le serveur doit relire l'ancien certificat meme si aucun fichier de
+    # configuration n'a change.
+    err = _test_and_reload(env, web_server)
     if err:
         raise WebconfError("Configuration restauree mais %s" % err)
 
