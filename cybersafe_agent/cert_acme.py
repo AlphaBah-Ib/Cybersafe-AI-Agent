@@ -34,11 +34,22 @@ MAX_OUTPUT = 8000
 # Version de lego et empreintes SHA-256 du binaire, par architecture.
 # A RENSEIGNER a la publication (runbook) : tant qu'une valeur est vide,
 # l'emission est refusee (fail-closed).
-LEGO_VERSION = "4.25.2"
+# lego 5.x : interface repensee (toutes les options APRES `run`, --cert.name).
+LEGO_VERSION = "5.4.1"
+CERT_NAME = "cybersafe"
+# Empreintes des BINAIRES extraits des archives officielles lego_v5.4.1_linux_*.tar.gz
+# (archives verifiees contre lego_5.4.1_checksums.txt le 26/11/2026).
 LEGO_SHA256 = {
-    "x86_64": "",
-    "aarch64": "",
+    "x86_64": "08958a0807295d2bad8eb9aa42bcc2c24cb31a3f327c4e4185c03d4d8a92c8ab",
+    "aarch64": "bfeb0d5052238102e530f1b3603eebaaa8c1c0b680186d64d36189e0711c503b",
 }
+# Copie publique dans le bucket de Cybersafe-AI (objets tools/ en lecture publique,
+# le reste du bucket reste prive). La confiance vient de l'empreinte ci-dessus,
+# inscrite dans le code SIGNE de l'agent, pas du bucket ni du reseau.
+LEGO_URL = ("https://cybersafe-agent-releases.s3.fr-par.scw.cloud/tools/lego/%s/linux-%s/lego"
+            % (LEGO_VERSION, "%s"))
+LEGO_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
+LEGO_MAX_BYTES = 150 * 1024 * 1024
 
 
 class AcmeError(Exception):
@@ -87,6 +98,56 @@ def open_verified_lego(path=LEGO_PATH, expected=None):
         raise
 
 
+def ensure_lego(path=LEGO_PATH, expected=None, opener=None):
+    """Installe lego s'il est absent ou different de la version figee : telechargement
+    borne, empreinte verifiee AVANT installation, remplacement atomique (0755 root)."""
+    expected = expected or _expected_sha256()
+    try:
+        fd = open_verified_lego(path, expected)
+        os.close(fd)
+        return path  # deja la bonne version
+    except AcmeError:
+        pass
+    arch = LEGO_ARCH.get(platform.machine())
+    if arch is None:
+        raise AcmeError("architecture %s non prise en charge pour l'outil ACME"
+                        % platform.machine())
+    url = LEGO_URL % arch
+    if opener is None:
+        import urllib.request
+        opener = urllib.request.urlopen
+    bindir = os.path.dirname(path)
+    os.makedirs(bindir, mode=0o700, exist_ok=True)
+    os.chmod(bindir, 0o700)
+    tmp = os.path.join(bindir, ".lego.download")
+    h, size = hashlib.sha256(), 0
+    try:
+        with opener(url, timeout=120) as resp, open(tmp, "wb") as out:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > LEGO_MAX_BYTES:
+                    raise AcmeError("outil ACME : telechargement trop volumineux")
+                h.update(chunk)
+                out.write(chunk)
+        if h.hexdigest() != expected:
+            raise AcmeError("outil ACME telecharge : empreinte inattendue (refuse)")
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+    except AcmeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — reseau, disque
+        raise AcmeError("outil ACME : telechargement impossible (%s)" % type(exc).__name__) from None
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    return path
+
+
 def _clean_output(raw):
     text = (raw or b"").decode("utf-8", "replace")
     if "PRIVATE KEY" in text.upper():
@@ -95,9 +156,10 @@ def _clean_output(raw):
 
 
 def lego_command(exe, directory, csr_path, data_dir=LEGO_DATA, webroot=WEBROOT):
-    return [exe, "--accept-tos", "--email", ACCOUNT_EMAIL, "--server", directory,
-            "--path", data_dir, "--key-type", "ec256", "--csr", csr_path,
-            "--http", "--http.webroot", webroot, "run"]
+    """lego 5.x : `lego run` puis ses options. Cle de compte : type par defaut (EC256)."""
+    return [exe, "run", "--accept-tos", "--email", ACCOUNT_EMAIL, "--server", directory,
+            "--path", data_dir, "--csr", csr_path, "--cert.name", CERT_NAME,
+            "--http", "--http.webroot", webroot]
 
 
 def ensure_webroot(webroot=WEBROOT):
@@ -125,19 +187,21 @@ def _lego_umask():
     os.umask(0o022)
 
 
-def _result_file(data_dir, primary):
-    # lego nomme ses fichiers d'apres le premier nom ("*" -> "_", hors porte 1).
-    return os.path.join(data_dir, "certificates", primary.replace("*", "_") + ".crt")
+def _result_file(data_dir):
+    # Nom fixe par --cert.name (independant des domaines).
+    return os.path.join(data_dir, "certificates", CERT_NAME + ".crt")
 
 
 def issue(directory, csr_path, hostnames, *, lego_path=LEGO_PATH, data_dir=LEGO_DATA,
-          webroot=WEBROOT, expected_sha256=None, runner=subprocess.run):
+          webroot=WEBROOT, expected_sha256=None, runner=subprocess.run, ensure=True):
     """Emet le certificat pour le CSR. Renvoie (feuille, chaine) en objets x509."""
     _prepare_dirs(data_dir, webroot)
-    out_file = _result_file(data_dir, hostnames[0])
+    out_file = _result_file(data_dir)
     certs_dir = os.path.dirname(out_file)
     if os.path.isdir(certs_dir):
         shutil.rmtree(certs_dir)  # ne jamais relire le resultat d'une emission precedente
+    if ensure:
+        ensure_lego(lego_path, expected_sha256)
     fd = open_verified_lego(lego_path, expected_sha256)
     try:
         exe = "/proc/self/fd/%d" % fd

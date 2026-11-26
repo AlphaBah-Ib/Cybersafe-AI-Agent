@@ -177,6 +177,7 @@ class TestStore:
         assert mode == 0o600
         assert stat.S_IMODE(os.stat(vdir).st_mode) == 0o700
         csr = x509.load_pem_x509_csr(csr_pem)
+        assert len(csr.subject) == 0  # pas de Common Name
         sans = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
         assert sorted(sans.get_values_for_type(x509.DNSName)) == NAMES
         assert b"PRIVATE" not in csr_pem
@@ -269,7 +270,7 @@ class TestAcme:
         args_log = tmp_path / "args.txt"
         script = ('echo "$@" > %s\n'
                   'while [ $# -gt 0 ]; do [ "$1" = "--path" ] && P="$2"; shift; done\n'
-                  'mkdir -p "$P/certificates" && cp %s "$P/certificates/client-a.fr.crt"\n'
+                  'mkdir -p "$P/certificates" && cp %s "$P/certificates/cybersafe.crt"\n'
                   % (args_log, bundle))
         path, digest = _fake_lego(tmp_path, script)
         monkeypatch.setattr(cert_acme, "ACME_HOME", str(tmp_path / "acme"))
@@ -278,7 +279,8 @@ class TestAcme:
                                       webroot=str(tmp_path / "webroot"), expected_sha256=digest)
         cert_store.store_certificate(vdir, leaf, chain, NAMES)
         args = args_log.read_text()
-        for expected in ("--csr", "--accept-tos", "--http.webroot", STAGING, " run"):
+        assert args.startswith("run ")  # lego 5 : options apres la commande
+        for expected in ("--csr", "--accept-tos", "--http.webroot", STAGING, "--cert.name cybersafe"):
             assert expected in args
         assert "privkey" not in args
         assert not os.path.exists(tmp_path / "acme" / "lego" / "certificates")
@@ -439,3 +441,64 @@ class TestService:
     def test_refuses_plain_http(self):
         assert not cert_service._secure("http://api.cybersafe-ai.com/api")
         assert cert_service._secure("https://api.cybersafe-ai.com/api")
+
+
+# --- 6. installation verifiee de lego (porte 4a) ----------------------------------------
+class _Resp:
+    def __init__(self, data):
+        import io
+        self._b = io.BytesIO(data)
+
+    def read(self, n=-1):
+        return self._b.read(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestLegoInstall:
+
+    def test_pinned_release(self):
+        assert cert_acme.LEGO_VERSION == "5.4.1"
+        for arch in ("x86_64", "aarch64"):
+            assert len(cert_acme.LEGO_SHA256[arch]) == 64
+        assert cert_acme.LEGO_URL % "amd64" == (
+            "https://cybersafe-agent-releases.s3.fr-par.scw.cloud/tools/lego/5.4.1/linux-amd64/lego")
+
+    def test_download_verify_install(self, tmp_path):
+        data = b"#!/bin/sh\nexit 0\n"
+        digest = hashlib.sha256(data).hexdigest()
+        target = str(tmp_path / "bin" / "lego")
+        calls = []
+        cert_acme.ensure_lego(target, digest, opener=lambda url, timeout: calls.append(url) or _Resp(data))
+        assert open(target, "rb").read() == data
+        assert stat.S_IMODE(os.stat(target).st_mode) == 0o755
+        assert stat.S_IMODE(os.stat(tmp_path / "bin").st_mode) == 0o700
+        cert_acme.ensure_lego(target, digest, opener=lambda *a, **k: calls.append("x") or _Resp(data))
+        assert len(calls) == 1  # deja installe : pas de second telechargement
+
+    def test_tampered_download_refused_and_not_installed(self, tmp_path):
+        target = str(tmp_path / "bin" / "lego")
+        with pytest.raises(cert_acme.AcmeError, match="empreinte inattendue"):
+            cert_acme.ensure_lego(target, "0" * 64, opener=lambda *a, **k: _Resp(b"malveillant"))
+        assert not os.path.exists(target)
+        assert not os.path.exists(str(tmp_path / "bin" / ".lego.download"))
+
+    def test_tampered_installed_binary_replaced(self, tmp_path):
+        good = b"bon binaire"
+        digest = hashlib.sha256(good).hexdigest()
+        target = tmp_path / "bin" / "lego"
+        target.parent.mkdir(mode=0o700)
+        target.write_bytes(b"binaire modifie")
+        target.chmod(0o755)
+        cert_acme.ensure_lego(str(target), digest, opener=lambda *a, **k: _Resp(good))
+        assert target.read_bytes() == good
+
+    def test_network_error_is_clean(self, tmp_path):
+        def boom(*a, **k):
+            raise OSError("connexion refusee")
+        with pytest.raises(cert_acme.AcmeError, match="telechargement impossible"):
+            cert_acme.ensure_lego(str(tmp_path / "bin" / "lego"), "0" * 64, opener=boom)

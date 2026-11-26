@@ -28,7 +28,6 @@ import time
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
 
 CERTS_ROOT = "/etc/cybersafe/certs"
 KEEP_VERSIONS = 3
@@ -91,8 +90,10 @@ def new_version(certificate_id, hostnames, root=CERTS_ROOT):
                                  serialization.PrivateFormat.PKCS8,
                                  serialization.NoEncryption()),
                0o600)
+    # Sujet vide, noms uniquement en SAN : le Common Name est obsolete (lego 5 ne le
+    # prend plus en charge par defaut, les AC publiques l'abandonnent).
     csr = (x509.CertificateSigningRequestBuilder()
-           .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostnames[0])]))
+           .subject_name(x509.Name([]))
            .add_extension(x509.SubjectAlternativeName([x509.DNSName(h) for h in hostnames]),
                           critical=False)
            .sign(key, hashes.SHA256()))
