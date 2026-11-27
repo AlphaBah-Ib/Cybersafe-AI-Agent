@@ -254,6 +254,10 @@ if systemctl list-unit-files | grep -q cybersafe-remediation.service; then
   systemctl restart cybersafe-remediation.service \
     || warn "remediation start KO (non bloquant)."
 fi
+# [CERT04-P2] le service des certificats doit lui aussi charger le nouveau code.
+if systemctl list-unit-files | grep -q cybersafe-cert.service; then
+  systemctl restart cybersafe-cert.service || warn "service certificats KO (non bloquant)."
+fi
 if systemctl is-active --quiet "${SERVICE_NAME}"; then
   ok "Agent redemarre et actif sur la version ${VERSION}."
   report_update "success" "mise a jour ${CURRENT_VERSION} -> ${REL_VERSION} appliquee"
